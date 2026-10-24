@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import LiveTryOn from "@/components/LiveTryOn";
+import type { ClosetGarment } from "@/lib/live-garment";
 
 type UploadKind = "photo" | "garment";
 type Upload = { url: string; name: string; file: File };
@@ -83,7 +85,7 @@ function ImageUpload({
         ) : (
           <span className="empty-upload">
             <span className="upload-icon-box"><UploadIcon /></span>
-            <span className="upload-copy"><strong>Click to upload <span>or drag and drop</span></strong><small>JPG, PNG or WEBP <i>·</i> up to 10 MB</small></span>
+            <span className="upload-copy"><strong>Click to upload <span>or drag and drop</span></strong><small>JPG, PNG or WEBP <i>·</i> under 8 MB</small></span>
             <span className="plus-mark" aria-hidden="true">+</span>
           </span>
         )}
@@ -95,16 +97,20 @@ function ImageUpload({
 
 export default function Home() {
   const requestController = useRef<AbortController | null>(null);
+  const closetRef = useRef<ClosetGarment[]>([]);
+  const [mode, setMode] = useState<"photo" | "live">("photo");
+  const [closet, setCloset] = useState<ClosetGarment[]>([]);
   const [photo, setPhoto] = useState<Upload | null>(null);
-  const [garment, setGarment] = useState<Upload | null>(null);
+  const [garment, setGarment] = useState<ClosetGarment | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "result" | "error">("idle");
   const [message, setMessage] = useState("");
   const [resultUrl, setResultUrl] = useState<string | null>(null);
 
   useEffect(() => () => {
     if (photo) URL.revokeObjectURL(photo.url);
-    if (garment) URL.revokeObjectURL(garment.url);
-  }, [photo, garment]);
+  }, [photo]);
+  useEffect(() => { closetRef.current = closet; }, [closet]);
+  useEffect(() => () => closetRef.current.forEach((item) => URL.revokeObjectURL(item.url)), []);
 
   useEffect(() => () => requestController.current?.abort(), []);
 
@@ -113,37 +119,70 @@ export default function Home() {
     requestController.current = null;
   }
 
-  function setUpload(kind: UploadKind, event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) { setMessage("Please choose an image file."); return; }
-    if (file.size > 10 * 1024 * 1024) { setMessage("That image is over 10 MB. Choose a smaller file."); return; }
+  function validateUpload(file: File) {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      setMessage("Please choose a JPEG, PNG, or WebP image."); setStatus("error"); return false;
+    }
+    if (!file.size || file.size >= 8 * 1024 * 1024) {
+      setMessage("Each image must be non-empty and smaller than 8 MB."); setStatus("error"); return false;
+    }
+    return true;
+  }
+
+  function clearResult() {
     cancelPendingRequest();
     setMessage("");
     setStatus("idle");
     setResultUrl(null);
-    const result = { url: URL.createObjectURL(file), name: file.name, file };
-    if (kind === "photo") setPhoto(result);
-    else setGarment(result);
+  }
+
+  function addGarment(file: File) {
+    if (!validateUpload(file)) return;
+    if (closet.length >= 12) { setMessage("Your session closet is full. Remove a piece before adding another."); setStatus("error"); return; }
+    clearResult();
+    const item: ClosetGarment = { id: crypto.randomUUID(), url: URL.createObjectURL(file), name: file.name, file };
+    setCloset((items) => [...items, item]);
+    setGarment(item);
+  }
+
+  function selectGarment(id: string) {
+    clearResult();
+    setGarment(closet.find((item) => item.id === id) ?? null);
+  }
+
+  function removeClosetGarment(id: string) {
+    clearResult();
+    const removed = closet.find((item) => item.id === id);
+    if (removed) URL.revokeObjectURL(removed.url);
+    setCloset((items) => items.filter((item) => item.id !== id));
+    if (garment?.id === id) setGarment(null);
+  }
+
+  function setUpload(kind: UploadKind, event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
     event.target.value = "";
+    if (!file) return;
+    if (kind === "garment") { addGarment(file); return; }
+    if (!validateUpload(file)) return;
+    clearResult();
+    setPhoto({ url: URL.createObjectURL(file), name: file.name, file });
   }
 
   function removeUpload(kind: UploadKind) {
-    cancelPendingRequest();
-    const current = kind === "photo" ? photo : garment;
-    if (current) URL.revokeObjectURL(current.url);
+    clearResult();
     if (kind === "photo") setPhoto(null);
     else setGarment(null);
-    setMessage("");
-    setStatus("idle");
-    setResultUrl(null);
   }
 
   const ready = Boolean(photo && garment);
 
-  async function handleTryOn(event: FormEvent<HTMLFormElement>) {
+  function handleTryOn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!photo || !garment || status === "loading") return;
+    if (photo && garment) void generateLook(photo.file, garment.file);
+  }
+
+  async function generateLook(personFile: File, garmentFile: File) {
+    if (requestController.current) return;
 
     setStatus("loading");
     setMessage("");
@@ -155,14 +194,16 @@ export default function Home() {
 
     try {
       const formData = new FormData();
-      formData.append("photo", photo.file);
-      formData.append("garment", garment.file);
+      formData.append("photo", personFile);
+      formData.append("garment", garmentFile);
 
       const response = await fetch("/api/tryon", { method: "POST", body: formData, signal: controller.signal });
       const payload: unknown = await response.json();
       const data = payload && typeof payload === "object"
         ? payload as { jobId?: unknown; status?: unknown; resultUrl?: unknown; error?: unknown }
         : {};
+
+      if (controller.signal.aborted) return;
 
       if (!response.ok) {
         throw new Error(typeof data.error === "string" ? data.error : "We couldn’t generate your look. Please try again.");
@@ -193,13 +234,29 @@ export default function Home() {
           return;
         }
 
-        const statusResponse = await fetch(`/api/tryon/${encodeURIComponent(data.jobId)}`, { signal: controller.signal });
-        const statusPayload: unknown = await statusResponse.json();
+        let statusResponse: Response;
+        try {
+          statusResponse = await fetch(`/api/tryon/${encodeURIComponent(data.jobId)}`, { signal: controller.signal });
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          setMessage("Connection interrupted. Checking your look again…");
+          continue;
+        }
+        const statusPayload: unknown = await statusResponse.json().catch(() => null);
         const job = statusPayload && typeof statusPayload === "object"
           ? statusPayload as { status?: unknown; resultUrl?: unknown; error?: unknown; retryable?: unknown }
           : {};
 
+        if (controller.signal.aborted) {
+          if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
+          return;
+        }
+
         if (!statusResponse.ok) {
+          if (statusResponse.status === 429 || statusResponse.status >= 500) {
+            setMessage("The service is taking a moment. Checking again…");
+            continue;
+          }
           throw new Error(typeof job.error === "string" ? job.error : "Could not check your try-on status. Please try again.");
         }
         if (job.status === "succeeded") {
@@ -213,7 +270,7 @@ export default function Home() {
         }
         if (job.status === "failed") {
           const errorMessage = typeof job.error === "string" ? job.error : "Your try-on could not be completed.";
-          throw new Error(job.retryable === true ? `${errorMessage} You can retry by selecting “Try it on” again.` : errorMessage);
+          throw new Error(job.retryable === true ? `${errorMessage} You can try again when you’re ready.` : errorMessage);
         }
         if (job.status !== "queued" && job.status !== "processing") {
           throw new Error("The try-on service returned an unknown job status.");
@@ -235,10 +292,8 @@ export default function Home() {
 
   function resetForm() {
     cancelPendingRequest();
-    if (photo) URL.revokeObjectURL(photo.url);
-    if (garment) URL.revokeObjectURL(garment.url);
     setPhoto(null);
-    setGarment(null);
+    if (mode === "photo") setGarment(null);
     setResultUrl(null);
     setMessage("");
     setStatus("idle");
@@ -254,7 +309,7 @@ export default function Home() {
         <div className="topbar-right"><span className="beta-pill"><span /> HACKATHON BUILD</span><span className="topbar-divider" /><span className="topbar-caption">Your personal fitting room</span></div>
       </header>
 
-      <div className="main-content">
+      <div className={`main-content ${mode === "live" ? "has-live-mode" : ""}`}>
         <section className="hero">
           <div className="eyebrow"><span className="eyebrow-line" /> THE FUTURE FITS YOU <span className="eyebrow-line" /></div>
           <h1>Meet your <span>new look.</span></h1>
@@ -262,6 +317,11 @@ export default function Home() {
           <p className="hero-description">See how something looks on you before it ever lands in your closet.<br className="desktop-break" /> Just add a photo, pick a piece, and let the magic happen.</p>
           <div className="micro-proof"><span className="proof-icon"><SparkleIcon /></span> A fitting room that goes wherever you do.</div>
         </section>
+
+        <div className="tryon-modes" role="group" aria-label="Try-on mode">
+          <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("photo"); }}>Photo try-on</button>
+          <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("live"); }}>Live try-on <span>WEBCAM</span></button>
+        </div>
 
         {status === "result" && resultUrl ? (
           <section className="studio-card result-card" aria-labelledby="result-title">
@@ -277,6 +337,12 @@ export default function Home() {
             />
             <button className="try-button try-another-button" type="button" onClick={resetForm}><span aria-hidden="true">↺</span> Try another</button>
           </section>
+        ) : mode === "live" ? (
+          <>
+            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={status === "loading"} />
+            {status === "loading" && <p className="live-job-message" role="status">{message || "Generating your look…"}</p>}
+            {status === "error" && <p className="live-job-message error-message" role="alert">{message}</p>}
+          </>
         ) : (
         <form className="studio-card" aria-label="Virtual try-on setup" aria-busy={status === "loading"} onSubmit={handleTryOn}>
           <div className="card-topline"><div><span className="card-kicker">LET’S GET STARTED</span><h2 className="card-title">Build your look<span>.</span></h2></div><div className="step-progress"><div className={photo ? "progress-active" : ""} /><div className={garment ? "progress-active" : ""} /></div></div>
@@ -292,7 +358,7 @@ export default function Home() {
             </button>
             {status === "error" ? <p className="status-message error-message" role="alert">{message}</p> : <p className="button-hint" aria-live="polite">{status === "loading" ? message || "This can take a few seconds." : ready ? "Both images are ready — let’s see the fit." : "Add both images to unlock your virtual try-on."}</p>}
           </div>
-          <div className="card-footer"><span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.5 5v4.2c0 4 2.7 6.8 6.5 8.3 3.8-1.5 6.5-4.3 6.5-8.3V5L10 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="m7.5 9.8 1.7 1.7 3.4-3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg> Your photos stay yours. Uploads are only previewed on this page.</span><span className="footer-sparkle">✳</span></div>
+          <div className="card-footer"><span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.5 5v4.2c0 4 2.7 6.8 6.5 8.3 3.8-1.5 6.5-4.3 6.5-8.3V5L10 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="m7.5 9.8 1.7 1.7 3.4-3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg> Photos are processed by Replicate. Generated results are stored at a public URL.</span><span className="footer-sparkle">✳</span></div>
         </form>
         )}
         <p className="page-footnote"><span>MADE FOR THE “WHAT IF?”</span><span className="footnote-dot">·</span><span>ONE LOOK AT A TIME</span></p>

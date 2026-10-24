@@ -6,11 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "tsx --test tests/*.test.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@imgly/background-removal-node": "^1.4.5",
+    "@mediapipe/tasks-vision": "1.1.1",
     "@supabase/supabase-js": "^2.118.0",
+    "@upstash/ratelimit": "^2.2.0",
     "@upstash/redis": "^1.39.0",
     "next": "^15.5.6",
     "react": "^19.1.1",
@@ -19,6 +23,7 @@
     "sharp": "^0.35.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4.1.14",
     "@types/node": "^22.18.10",
     "@types/react": "^19.2.2",
@@ -26,6 +31,7 @@
     "eslint": "^9.38.0",
     "eslint-config-next": "^15.5.6",
     "tailwindcss": "^4.1.14",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   },
   "allowScripts": {

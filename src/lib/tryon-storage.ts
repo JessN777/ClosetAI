@@ -4,6 +4,26 @@ import sharp from "sharp";
 const BUCKET_NAME = "tryon-results";
 const MAX_RESULT_BYTES = 25 * 1024 * 1024;
 
+async function readLimitedResponse(response: Response, maxBytes: number) {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      throw new Error("The Replicate output is larger than the 25 MB storage limit.");
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
 export function hasTryOnStorageConfig() {
   return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 }
@@ -31,11 +51,8 @@ export async function persistTryOnResult(inputHash: string, replicateUrl: string
     throw new Error("The Replicate output is larger than the 25 MB storage limit.");
   }
 
-  const downloadedBytes = Buffer.from(await response.arrayBuffer());
+  const downloadedBytes = await readLimitedResponse(response, MAX_RESULT_BYTES);
   if (!downloadedBytes.byteLength) throw new Error("The Replicate output image was empty.");
-  if (downloadedBytes.byteLength > MAX_RESULT_BYTES) {
-    throw new Error("The Replicate output is larger than the 25 MB storage limit.");
-  }
 
   const pngBytes = await sharp(downloadedBytes).png().toBuffer();
   const path = `${inputHash}.png`;

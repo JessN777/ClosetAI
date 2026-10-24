@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { createHash, randomUUID } from "node:crypto";
 import Replicate from "replicate";
+import { Ratelimit } from "@upstash/ratelimit";
 import { removeBackground } from "@imgly/background-removal-node";
-import sharp from "sharp";
-import { getCachedTryOnResult, getTryOnRedis, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
+import sharp, { type Metadata } from "sharp";
+import { getCachedTryOnResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, reserveTryOnJob, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
 import { hasTryOnStorageConfig } from "@/lib/tryon-storage";
+import { isRetryableReplicateError, withReplicateRetry } from "@/lib/replicate-retry";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -12,28 +14,74 @@ export const maxDuration = 60;
 const MODEL_VERSION =
   "0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985";
 
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_GARMENT_DESCRIPTION_LENGTH = 200;
+const MIN_IMAGE_SIDE = 256;
+const MAX_IMAGE_SIDE = 4096;
 const DATA_URL_BYTE_LIMIT = 256 * 1024;
-const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MIME_FORMATS = {
+  "image/jpeg": "jpeg",
+  "image/png": "png",
+  "image/webp": "webp",
+} as const;
 
 function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-function readImage(form: FormData, field: "photo" | "garment") {
-  const value = form.get(field);
-  if (!(value instanceof File) || value.size === 0) {
-    return errorResponse(
-      `Missing ${field} image. Upload both images as multipart form fields named "photo" and "garment".`,
-      400,
-    );
+async function validateImage(form: FormData, field: "photo" | "garment") {
+  const label = field === "photo" ? "Your photo" : "Garment";
+  const values = form.getAll(field);
+  if (values.length > 1) {
+    return errorResponse(`${label} image must be uploaded only once.`, 400);
   }
-  if (!ALLOWED_TYPES.has(value.type)) {
-    return errorResponse(`${field} must be a JPEG, PNG, or WEBP image.`, 400);
+  const value = values[0];
+  if (!(value instanceof File)) {
+    return errorResponse(`${label} image is required.`, 400);
   }
-  if (value.size > MAX_IMAGE_BYTES) {
-    return errorResponse(`${field} is over 10 MB. Choose a smaller image.`, 400);
+  if (value.size === 0) {
+    return errorResponse(`${label} image is empty.`, 400);
   }
+  const declaredFormat = MIME_FORMATS[value.type.toLowerCase() as keyof typeof MIME_FORMATS];
+  if (!declaredFormat) {
+    return errorResponse(`${label} must be a JPEG, PNG, or WebP image.`, 400);
+  }
+
+  if (value.size >= MAX_IMAGE_BYTES) {
+    return errorResponse(`${label} must be smaller than 8 MB.`, 400);
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(await value.arrayBuffer());
+  } catch {
+    return errorResponse(`${label} image could not be read. Please upload it again.`, 400);
+  }
+  let metadata: Metadata;
+  try {
+    metadata = await sharp(bytes).metadata();
+  } catch {
+    return errorResponse(`${label} must be a valid JPEG, PNG, or WebP image.`, 400);
+  }
+
+  if (metadata.format !== declaredFormat) {
+    return errorResponse(`${label} file contents do not match its JPEG, PNG, or WebP type.`, 400);
+  }
+  if (!metadata.width || !metadata.height) {
+    return errorResponse(`${label} image dimensions could not be read.`, 400);
+  }
+  if (metadata.width < MIN_IMAGE_SIDE || metadata.height < MIN_IMAGE_SIDE) {
+    return errorResponse(`${label} must be at least 256 pixels wide and 256 pixels high.`, 400);
+  }
+  if (metadata.width > MAX_IMAGE_SIDE || metadata.height > MAX_IMAGE_SIDE) {
+    return errorResponse(`${label} cannot exceed 4096 pixels wide or 4096 pixels high.`, 400);
+  }
+  try {
+    await sharp(bytes, { failOn: "warning" }).resize(1, 1).toBuffer();
+  } catch {
+    return errorResponse(`${label} image could not be decoded. Upload a valid JPEG, PNG, or WebP file.`, 400);
+  }
+
   return value;
 }
 
@@ -108,10 +156,28 @@ export async function POST(request: Request) {
     );
   }
 
-  const photo = readImage(form, "photo");
+  for (const field of form.keys()) {
+    if (!["photo", "garment", "garment_des"].includes(field)) {
+      return errorResponse("The request contains an unsupported form field.", 400);
+    }
+  }
+
+  const photo = await validateImage(form, "photo");
   if (!(photo instanceof File)) return photo;
-  const garment = readImage(form, "garment");
+  const garment = await validateImage(form, "garment");
   if (!(garment instanceof File)) return garment;
+
+  const descriptionValues = form.getAll("garment_des");
+  const descriptionValue = descriptionValues[0];
+  if (descriptionValues.length > 1 || (descriptionValue !== undefined && typeof descriptionValue !== "string")) {
+    return errorResponse("Garment description must be a single text value.", 400);
+  }
+  const garmentDes = typeof descriptionValue === "string" && descriptionValue.trim()
+    ? descriptionValue.trim()
+    : "clothing";
+  if (garmentDes.length > MAX_GARMENT_DESCRIPTION_LENGTH) {
+    return errorResponse("Garment description must be 200 characters or fewer.", 400);
+  }
 
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
@@ -128,8 +194,36 @@ export async function POST(request: Request) {
       503,
     );
   }
-  const replicate = new Replicate({ auth: token });
+
+  const ipAddress = request.headers.get("x-real-ip")?.trim()
+    || request.headers.get("cf-connecting-ip")?.trim()
+    || "unknown";
+  const ipIdentifier = createHash("sha256").update(ipAddress).digest("hex");
+  let rateSuccess: boolean;
+  let rateReset: number;
+  try {
+    const rateLimit = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(5, "1 h"),
+      analytics: false,
+      prefix: "closetai:tryon:rate-limit:v1",
+    });
+    const rateResult = await rateLimit.limit(ipIdentifier);
+    rateSuccess = rateResult.success;
+    rateReset = rateResult.reset;
+  } catch {
+    return errorResponse("Try-on rate limiting is temporarily unavailable. Please try again shortly.", 503);
+  }
+  if (!rateSuccess) {
+    const retryAfter = Math.max(1, Math.ceil((rateReset - Date.now()) / 1000));
+    return NextResponse.json(
+      { error: "You’ve reached the limit of 5 try-ons per hour. Please try again later." },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } },
+    );
+  }
+
   let predictionId: string | undefined;
+  let activeJob: TryOnJob | undefined;
 
   try {
     const [personPng, garmentPng] = await Promise.all([
@@ -160,18 +254,45 @@ export async function POST(request: Request) {
       );
     }
 
+    const pendingJob: TryOnJob = {
+      jobId,
+      inputHash,
+      status: "queued",
+      createdAt: Date.now(),
+    };
+    const reservation = await reserveTryOnJob(redis, pendingJob);
+    if (!reservation.acquired) {
+      const existingJob = await getTryOnJob(redis, reservation.jobId);
+      if (!existingJob) {
+        return NextResponse.json(
+          { error: "A matching try-on is starting. Please retry shortly." },
+          { status: 503, headers: { "Retry-After": "1" } },
+        );
+      }
+      if (existingJob.status === "succeeded" && existingJob.resultUrl) {
+        return NextResponse.json({ jobId: existingJob.jobId, status: "succeeded", resultUrl: existingJob.resultUrl });
+      }
+      return NextResponse.json({ jobId: existingJob.jobId }, { status: 202 });
+    }
+    activeJob = pendingJob;
+
+    // A prior request may have populated the cache after this request's first lookup.
+    const lateCachedResultUrl = await getCachedTryOnResult(redis, inputHash);
+    if (lateCachedResultUrl) {
+      const cachedJob = { ...pendingJob, status: "succeeded" as const, resultUrl: lateCachedResultUrl };
+      await saveTryOnJob(redis, cachedJob);
+      await releaseActiveTryOn(redis, inputHash, jobId);
+      return NextResponse.json({ jobId, status: "succeeded", resultUrl: lateCachedResultUrl });
+    }
+
+    const replicate = new Replicate({ auth: token });
+
     const [humanImg, garmImg] = await Promise.all([
-      toModelImage(replicate, personPng, "person.png"),
-      toModelImage(replicate, garmentPng, "garment.png"),
+      withReplicateRetry(() => toModelImage(replicate, personPng, "person.png")),
+      withReplicateRetry(() => toModelImage(replicate, garmentPng, "garment.png")),
     ]);
 
-    const descriptionField = form.get("garment_des");
-    const garmentDes =
-      typeof descriptionField === "string" && descriptionField.trim()
-        ? descriptionField.trim()
-        : "clothing";
-
-    const prediction = await replicate.predictions.create({
+    const prediction = await withReplicateRetry(() => replicate.predictions.create({
       version: MODEL_VERSION,
       input: {
         human_img: humanImg,
@@ -179,39 +300,43 @@ export async function POST(request: Request) {
         garment_des: garmentDes,
       },
       wait: false,
-    });
+    }));
     predictionId = prediction.id;
 
     const initialStatus: TryOnStatus =
       prediction.status === "processing" ? "processing" : "queued";
     const job: TryOnJob = {
-      jobId,
+      ...pendingJob,
       predictionId: prediction.id,
-      inputHash,
       status: initialStatus,
-      createdAt: Date.now(),
     };
-
-    try {
-      await saveTryOnJob(redis, job);
-    } catch {
-      await replicate.predictions.cancel(prediction.id).catch(() => undefined);
-      return errorResponse("Could not save the try-on job. Please try again.", 503);
-    }
+    activeJob = job;
+    const saved = await saveTryOnJob(redis, job);
+    if (!saved) throw new Error("Could not save the try-on job.");
 
     return NextResponse.json({ jobId }, { status: 202 });
   } catch (error) {
     if (predictionId) {
-      await replicate.predictions.cancel(predictionId).catch(() => undefined);
+      const replicate = new Replicate({ auth: token });
+      const idToCancel = predictionId;
+      await withReplicateRetry(() => replicate.predictions.cancel(idToCancel)).catch(() => undefined);
     }
 
     const message = error instanceof Error ? error.message : "Unexpected error while running virtual try-on.";
-    if (/unauthor|invalid token|401/i.test(message)) {
-      return errorResponse(
-        "Replicate rejected the API token. Check REPLICATE_API_TOKEN in .env.local.",
-        401,
-      );
+    if (activeJob) {
+      const failureJob: TryOnJob = {
+        ...activeJob,
+        status: "failed",
+        error: "Could not start the try-on. Please try again.",
+        retryable: isRetryableReplicateError(error),
+      };
+      await saveTryOnJob(redis, failureJob).catch(() => undefined);
+      await releaseActiveTryOn(redis, activeJob.inputHash, activeJob.jobId).catch(() => undefined);
     }
-    return errorResponse(`Virtual try-on failed: ${message}`, 502);
+
+    if (/unauthor|invalid token|401/i.test(message)) {
+      return errorResponse("Replicate could not authenticate the request. Check REPLICATE_API_TOKEN on the server.", 401);
+    }
+    return errorResponse("Could not start the virtual try-on. Please try again.", 502);
   }
 }
