@@ -94,6 +94,7 @@ function ImageUpload({
 }
 
 export default function Home() {
+  const requestController = useRef<AbortController | null>(null);
   const [photo, setPhoto] = useState<Upload | null>(null);
   const [garment, setGarment] = useState<Upload | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "result" | "error">("idle");
@@ -105,11 +106,19 @@ export default function Home() {
     if (garment) URL.revokeObjectURL(garment.url);
   }, [photo, garment]);
 
+  useEffect(() => () => requestController.current?.abort(), []);
+
+  function cancelPendingRequest() {
+    requestController.current?.abort();
+    requestController.current = null;
+  }
+
   function setUpload(kind: UploadKind, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith("image/")) { setMessage("Please choose an image file."); return; }
     if (file.size > 10 * 1024 * 1024) { setMessage("That image is over 10 MB. Choose a smaller file."); return; }
+    cancelPendingRequest();
     setMessage("");
     setStatus("idle");
     setResultUrl(null);
@@ -120,6 +129,7 @@ export default function Home() {
   }
 
   function removeUpload(kind: UploadKind) {
+    cancelPendingRequest();
     const current = kind === "photo" ? photo : garment;
     if (current) URL.revokeObjectURL(current.url);
     if (kind === "photo") setPhoto(null);
@@ -138,32 +148,92 @@ export default function Home() {
     setStatus("loading");
     setMessage("");
     setResultUrl(null);
+    const controller = new AbortController();
+    requestController.current = controller;
+    let timeoutReached = false;
+    let timeoutId: number | undefined;
 
     try {
       const formData = new FormData();
       formData.append("photo", photo.file);
       formData.append("garment", garment.file);
 
-      const response = await fetch("/api/tryon", { method: "POST", body: formData });
+      const response = await fetch("/api/tryon", { method: "POST", body: formData, signal: controller.signal });
       const payload: unknown = await response.json();
-      const data = payload && typeof payload === "object" ? payload as { resultUrl?: unknown; error?: unknown } : {};
+      const data = payload && typeof payload === "object"
+        ? payload as { jobId?: unknown; status?: unknown; resultUrl?: unknown; error?: unknown }
+        : {};
 
       if (!response.ok) {
         throw new Error(typeof data.error === "string" ? data.error : "We couldn’t generate your look. Please try again.");
       }
-      if (typeof data.resultUrl !== "string" || !data.resultUrl) {
-        throw new Error("The try-on service returned no result image. Please try again.");
+      if (typeof data.jobId !== "string" || !data.jobId) {
+        throw new Error("The try-on service did not return a job ID. Please try again.");
+      }
+      if (data.status === "succeeded") {
+        if (typeof data.resultUrl !== "string" || !data.resultUrl) {
+          throw new Error("The cached try-on result is missing its image. Please try again.");
+        }
+        setResultUrl(data.resultUrl);
+        setStatus("result");
+        return;
       }
 
-      setResultUrl(data.resultUrl);
-      setStatus("result");
+      const deadline = Date.now() + 90_000;
+      timeoutId = window.setTimeout(() => {
+        timeoutReached = true;
+        controller.abort();
+      }, 90_000);
+      setMessage("Your look is queued up…");
+
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        if (controller.signal.aborted) {
+          if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
+          return;
+        }
+
+        const statusResponse = await fetch(`/api/tryon/${encodeURIComponent(data.jobId)}`, { signal: controller.signal });
+        const statusPayload: unknown = await statusResponse.json();
+        const job = statusPayload && typeof statusPayload === "object"
+          ? statusPayload as { status?: unknown; resultUrl?: unknown; error?: unknown }
+          : {};
+
+        if (!statusResponse.ok) {
+          throw new Error(typeof job.error === "string" ? job.error : "Could not check your try-on status. Please try again.");
+        }
+        if (job.status === "succeeded") {
+          if (typeof job.resultUrl !== "string" || !job.resultUrl) {
+            throw new Error("The try-on finished without returning an image. Please try again.");
+          }
+          setResultUrl(job.resultUrl);
+          setMessage("");
+          setStatus("result");
+          return;
+        }
+        if (job.status === "failed") {
+          throw new Error(typeof job.error === "string" ? job.error : "Your try-on could not be completed. Please try again.");
+        }
+        if (job.status !== "queued" && job.status !== "processing") {
+          throw new Error("The try-on service returned an unknown job status.");
+        }
+
+        setMessage(job.status === "processing" ? "Generating your look…" : "Your look is queued up…");
+      }
+
+      throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
     } catch (error) {
+      if (controller.signal.aborted && !timeoutReached) return;
       setMessage(error instanceof Error ? error.message : "Something went wrong. Please try again.");
       setStatus("error");
+    } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      if (requestController.current === controller) requestController.current = null;
     }
   }
 
   function resetForm() {
+    cancelPendingRequest();
     if (photo) URL.revokeObjectURL(photo.url);
     if (garment) URL.revokeObjectURL(garment.url);
     setPhoto(null);
@@ -219,7 +289,7 @@ export default function Home() {
             <button className={`try-button ${status === "loading" ? "is-loading" : ""}`} type="submit" disabled={!ready || status === "loading"}>
               {status === "loading" ? <><span className="loading-spinner" aria-hidden="true" /><span>Generating your look…</span></> : <><SparkleIcon className="button-sparkle" /> <span>Try it on</span> <span className="button-arrow">↗</span></>}
             </button>
-            {status === "error" ? <p className="status-message error-message" role="alert">{message}</p> : <p className="button-hint" aria-live="polite">{status === "loading" ? "This can take a few seconds." : ready ? "Both images are ready — let’s see the fit." : "Add both images to unlock your virtual try-on."}</p>}
+            {status === "error" ? <p className="status-message error-message" role="alert">{message}</p> : <p className="button-hint" aria-live="polite">{status === "loading" ? message || "This can take a few seconds." : ready ? "Both images are ready — let’s see the fit." : "Add both images to unlock your virtual try-on."}</p>}
           </div>
           <div className="card-footer"><span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.5 5v4.2c0 4 2.7 6.8 6.5 8.3 3.8-1.5 6.5-4.3 6.5-8.3V5L10 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="m7.5 9.8 1.7 1.7 3.4-3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg> Your photos stay yours. Uploads are only previewed on this page.</span><span className="footer-sparkle">✳</span></div>
         </form>

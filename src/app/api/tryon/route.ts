@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
+import { createHash, randomUUID } from "node:crypto";
 import Replicate from "replicate";
+import { removeBackground } from "@imgly/background-removal-node";
+import sharp from "sharp";
+import { getCachedTryOnResult, getTryOnRedis, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -7,19 +11,12 @@ export const maxDuration = 60;
 const MODEL_VERSION =
   "0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985";
 
-const TIMEOUT_MS = 60_000;
-const POLL_INTERVAL_MS = 1_000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const DATA_URL_BYTE_LIMIT = 256 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const TERMINAL_STATUSES = new Set(["succeeded", "failed", "canceled", "aborted"]);
 
 function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readImage(form: FormData, field: "photo" | "garment") {
@@ -39,13 +36,37 @@ function readImage(form: FormData, field: "photo" | "garment") {
   return value;
 }
 
-async function toModelImage(replicate: Replicate, file: File) {
-  if (file.size <= DATA_URL_BYTE_LIMIT) {
-    const bytes = Buffer.from(await file.arrayBuffer());
-    return `data:${file.type};base64,${bytes.toString("base64")}`;
+async function preparePersonPhoto(file: File) {
+  const source = Buffer.from(await file.arrayBuffer());
+  return sharp(source)
+    .rotate()
+    .resize(768, 1024, {
+      fit: "contain",
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
+    .png()
+    .toBuffer();
+}
+
+async function prepareGarmentImage(file: File) {
+  const source = new Blob([new Uint8Array(await file.arrayBuffer())], { type: file.type });
+  const transparentCutout = await removeBackground(source, {
+    model: "small",
+    output: { format: "image/png", quality: 1 },
+  });
+  const cutoutBytes = Buffer.from(await transparentCutout.arrayBuffer());
+
+  // Flatten onto white so the model receives an ordinary opaque PNG.
+  return sharp(cutoutBytes).flatten({ background: "#ffffff" }).png().toBuffer();
+}
+
+async function toModelImage(replicate: Replicate, bytes: Buffer, filename: string) {
+  if (bytes.byteLength <= DATA_URL_BYTE_LIMIT) {
+    return `data:image/png;base64,${bytes.toString("base64")}`;
   }
 
-  const uploaded = await replicate.files.create(file);
+  const processedFile = new File([new Uint8Array(bytes)], filename, { type: "image/png" });
+  const uploaded = await replicate.files.create(processedFile);
   const url = uploaded.urls?.get;
   if (!url) {
     throw new Error("Replicate did not return a URL for the uploaded image.");
@@ -53,32 +74,21 @@ async function toModelImage(replicate: Replicate, file: File) {
   return url;
 }
 
-function outputImageUrl(output: unknown): string | null {
-  if (typeof output === "string" && output.length > 0) return output;
-  if (Array.isArray(output)) {
-    const url = output.find((item) => typeof item === "string" && item.length > 0);
-    return typeof url === "string" ? url : null;
-  }
-  if (output && typeof output === "object" && "url" in output) {
-    const url = (output as { url: unknown }).url;
-    if (typeof url === "function") {
-      const value = url.call(output);
-      return typeof value === "string" && value.length > 0 ? value : null;
-    }
-    if (typeof url === "string" && url.length > 0) return url;
-  }
-  return null;
+function tryOnInputHash(personPng: Buffer, garmentPng: Buffer) {
+  const hash = createHash("sha256");
+  const addBytes = (bytes: Buffer) => {
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.byteLength));
+    hash.update(length).update(bytes);
+  };
+
+  hash.update(MODEL_VERSION, "utf8").update(Buffer.from([0]));
+  addBytes(personPng);
+  addBytes(garmentPng);
+  return hash.digest("hex");
 }
 
 export async function POST(request: Request) {
-  const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    return errorResponse(
-      "REPLICATE_API_TOKEN is missing. Add it to .env.local and restart the dev server.",
-      500,
-    );
-  }
-
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return errorResponse(
@@ -102,26 +112,51 @@ export async function POST(request: Request) {
   const garment = readImage(form, "garment");
   if (!(garment instanceof File)) return garment;
 
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) {
+    return errorResponse(
+      "REPLICATE_API_TOKEN is missing. Add it to .env.local and restart the dev server.",
+      500,
+    );
+  }
+
+  const redis = getTryOnRedis();
+  if (!redis) {
+    return errorResponse(
+      "Upstash Redis is not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to the server environment.",
+      503,
+    );
+  }
+
   const replicate = new Replicate({ auth: token });
-  const deadline = Date.now() + TIMEOUT_MS;
   let predictionId: string | undefined;
 
-  const timedOut = () => Date.now() >= deadline;
-
-  const cancelPrediction = async () => {
-    if (!predictionId) return;
-    await replicate.predictions.cancel(predictionId).catch(() => undefined);
-  };
-
   try {
-    const [humanImg, garmImg] = await Promise.all([
-      toModelImage(replicate, photo),
-      toModelImage(replicate, garment),
+    const [personPng, garmentPng] = await Promise.all([
+      preparePersonPhoto(photo),
+      prepareGarmentImage(garment),
     ]);
 
-    if (timedOut()) {
-      return errorResponse("The try-on timed out after 60 seconds. Please try again.", 504);
+    const inputHash = tryOnInputHash(personPng, garmentPng);
+    const cachedResultUrl = await getCachedTryOnResult(redis, inputHash);
+    const jobId = randomUUID();
+
+    if (cachedResultUrl) {
+      const cachedJob: TryOnJob = {
+        jobId,
+        inputHash,
+        status: "succeeded",
+        resultUrl: cachedResultUrl,
+        createdAt: Date.now(),
+      };
+      await saveTryOnJob(redis, cachedJob);
+      return NextResponse.json({ jobId, status: "succeeded", resultUrl: cachedResultUrl });
     }
+
+    const [humanImg, garmImg] = await Promise.all([
+      toModelImage(replicate, personPng, "person.png"),
+      toModelImage(replicate, garmentPng, "garment.png"),
+    ]);
 
     const descriptionField = form.get("garment_des");
     const garmentDes =
@@ -129,47 +164,38 @@ export async function POST(request: Request) {
         ? descriptionField.trim()
         : "clothing";
 
-    let prediction = await replicate.predictions.create({
+    const prediction = await replicate.predictions.create({
       version: MODEL_VERSION,
       input: {
         human_img: humanImg,
         garm_img: garmImg,
         garment_des: garmentDes,
       },
+      wait: false,
     });
     predictionId = prediction.id;
 
-    while (!TERMINAL_STATUSES.has(prediction.status)) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        await cancelPrediction();
-        return errorResponse("The try-on timed out after 60 seconds. Please try again.", 504);
-      }
-      await sleep(Math.min(POLL_INTERVAL_MS, remaining));
-      if (timedOut()) {
-        await cancelPrediction();
-        return errorResponse("The try-on timed out after 60 seconds. Please try again.", 504);
-      }
-      prediction = await replicate.predictions.get(prediction.id);
+    const initialStatus: TryOnStatus =
+      prediction.status === "processing" ? "processing" : "queued";
+    const job: TryOnJob = {
+      jobId,
+      predictionId: prediction.id,
+      inputHash,
+      status: initialStatus,
+      createdAt: Date.now(),
+    };
+
+    try {
+      await saveTryOnJob(redis, job);
+    } catch {
+      await replicate.predictions.cancel(prediction.id).catch(() => undefined);
+      return errorResponse("Could not save the try-on job. Please try again.", 503);
     }
 
-    if (prediction.status !== "succeeded") {
-      const detail = prediction.error
-        ? String(prediction.error)
-        : `the model finished with status "${prediction.status}"`;
-      return errorResponse(`Virtual try-on failed: ${detail}`, 502);
-    }
-
-    const resultUrl = outputImageUrl(prediction.output);
-    if (!resultUrl) {
-      return errorResponse("Virtual try-on finished but did not return an image URL.", 502);
-    }
-
-    return NextResponse.json({ resultUrl });
+    return NextResponse.json({ jobId }, { status: 202 });
   } catch (error) {
-    if (timedOut()) {
-      await cancelPrediction();
-      return errorResponse("The try-on timed out after 60 seconds. Please try again.", 504);
+    if (predictionId) {
+      await replicate.predictions.cancel(predictionId).catch(() => undefined);
     }
 
     const message = error instanceof Error ? error.message : "Unexpected error while running virtual try-on.";
