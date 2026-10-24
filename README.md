@@ -8,12 +8,15 @@ Copy `.env.example` to `.env.local` and set:
 
 - `REPLICATE_API_TOKEN` from your Replicate account.
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` from an Upstash Redis database.
+- `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for server-side Storage uploads.
 
-Jobs are stored under `closetai:tryon:<jobId>` and expire after 24 hours. Successful results are cached by SHA-256 of the normalized person PNG, processed garment PNG, and model version for 50 minutes. That cache window stays within Replicate's one-hour output-file retention window. Failures are never cached. The API returns a configuration error when Redis credentials are missing; it does not use in-memory storage.
+Create a public Supabase Storage bucket named `tryon-results`. Files in a public bucket are readable by anyone with the URL. Keep the service-role key server-side; it is used only by the API route. Generated PNGs are stored as `<input-sha256>.png`, and their public URLs are saved in Redis. Jobs expire after 24 hours. Successful result URLs are cached by SHA-256 of the normalized person PNG, processed garment PNG, and model version. Failures are never cached. The API returns a configuration error when Redis credentials are missing; it does not use in-memory storage.
 
 ## API
 
 - `POST /api/tryon` accepts multipart form data with `photo` and `garment` image fields, then returns `{ "jobId": "..." }` with HTTP 202 after Replicate accepts the prediction and the job is saved.
 - `GET /api/tryon/:id` returns `{ "status": "queued" | "processing" | "succeeded" | "failed" }`, with `resultUrl` on success or `error` on failure.
+
+If Replicate output download or Supabase upload fails after a prediction succeeds, the job is marked `failed` with `retryable: true`.
 
 Run locally with `npm run dev`.

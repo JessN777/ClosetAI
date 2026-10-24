@@ -196,7 +196,7 @@ export default function Home() {
         const statusResponse = await fetch(`/api/tryon/${encodeURIComponent(data.jobId)}`, { signal: controller.signal });
         const statusPayload: unknown = await statusResponse.json();
         const job = statusPayload && typeof statusPayload === "object"
-          ? statusPayload as { status?: unknown; resultUrl?: unknown; error?: unknown }
+          ? statusPayload as { status?: unknown; resultUrl?: unknown; error?: unknown; retryable?: unknown }
           : {};
 
         if (!statusResponse.ok) {
@@ -212,7 +212,8 @@ export default function Home() {
           return;
         }
         if (job.status === "failed") {
-          throw new Error(typeof job.error === "string" ? job.error : "Your try-on could not be completed. Please try again.");
+          const errorMessage = typeof job.error === "string" ? job.error : "Your try-on could not be completed.";
+          throw new Error(job.retryable === true ? `${errorMessage} You can retry by selecting “Try it on” again.` : errorMessage);
         }
         if (job.status !== "queued" && job.status !== "processing") {
           throw new Error("The try-on service returned an unknown job status.");

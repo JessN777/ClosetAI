@@ -10,11 +10,10 @@ export type TryOnJob = {
   createdAt: number;
   resultUrl?: string;
   error?: string;
+  retryable?: boolean;
 };
 
 const JOB_TTL_SECONDS = 24 * 60 * 60;
-// Replicate API output-file URLs expire after one hour; keep cache links shorter-lived.
-const RESULT_CACHE_TTL_SECONDS = 50 * 60;
 
 export function getTryOnRedis() {
   const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -35,7 +34,7 @@ export async function getTryOnJob(redis: Redis, jobId: string) {
 }
 
 function resultCacheKey(inputHash: string) {
-  return `closetai:tryon:result:${inputHash}`;
+  return `closetai:tryon:result:v2:${inputHash}`;
 }
 
 export async function getCachedTryOnResult(redis: Redis, inputHash: string) {
@@ -44,5 +43,5 @@ export async function getCachedTryOnResult(redis: Redis, inputHash: string) {
 }
 
 export async function saveCachedTryOnResult(redis: Redis, inputHash: string, resultUrl: string) {
-  await redis.set(resultCacheKey(inputHash), { resultUrl }, { ex: RESULT_CACHE_TTL_SECONDS });
+  await redis.set(resultCacheKey(inputHash), { resultUrl });
 }

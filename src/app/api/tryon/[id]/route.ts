@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import Replicate from "replicate";
 import { getTryOnJob, getTryOnRedis, saveCachedTryOnResult, saveTryOnJob } from "@/lib/tryon-jobs";
+import { persistTryOnResult } from "@/lib/tryon-storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
@@ -47,7 +49,7 @@ export async function GET(
 
     if (job.status === "succeeded" || job.status === "failed") {
       return NextResponse.json(
-        { status: job.status, ...(job.resultUrl ? { resultUrl: job.resultUrl } : {}), ...(job.error ? { error: job.error } : {}) },
+        { status: job.status, ...(job.resultUrl ? { resultUrl: job.resultUrl } : {}), ...(job.error ? { error: job.error } : {}), ...(job.retryable !== undefined ? { retryable: job.retryable } : {}) },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
@@ -60,15 +62,29 @@ export async function GET(
     let updated = job;
 
     if (prediction.status === "succeeded") {
-      const resultUrl = outputImageUrl(prediction.output);
-      updated = resultUrl
-        ? { ...job, status: "succeeded", resultUrl, error: undefined }
-        : { ...job, status: "failed", error: "The try-on finished without returning an image." };
+      const replicateUrl = outputImageUrl(prediction.output);
+      if (!replicateUrl) {
+        updated = { ...job, status: "failed", error: "The try-on finished without returning an image.", retryable: false };
+      } else {
+        try {
+          const resultUrl = await persistTryOnResult(job.inputHash, replicateUrl);
+          updated = { ...job, status: "succeeded", resultUrl, error: undefined, retryable: false };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "Unknown storage error.";
+          updated = {
+            ...job,
+            status: "failed",
+            error: `Could not save the try-on image. ${detail}`,
+            retryable: true,
+          };
+        }
+      }
     } else if (["failed", "canceled", "aborted"].includes(prediction.status)) {
       updated = {
         ...job,
         status: "failed",
         error: prediction.error ? String(prediction.error) : "The try-on could not be completed.",
+        retryable: false,
       };
     } else {
       updated = { ...job, status: prediction.status === "processing" ? "processing" : "queued" };
@@ -82,7 +98,7 @@ export async function GET(
     }
 
     return NextResponse.json(
-      { status: updated.status, ...(updated.resultUrl ? { resultUrl: updated.resultUrl } : {}), ...(updated.error ? { error: updated.error } : {}) },
+      { status: updated.status, ...(updated.resultUrl ? { resultUrl: updated.resultUrl } : {}), ...(updated.error ? { error: updated.error } : {}), ...(updated.retryable !== undefined ? { retryable: updated.retryable } : {}) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

@@ -4,6 +4,7 @@ import Replicate from "replicate";
 import { removeBackground } from "@imgly/background-removal-node";
 import sharp from "sharp";
 import { getCachedTryOnResult, getTryOnRedis, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
+import { hasTryOnStorageConfig } from "@/lib/tryon-storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -127,7 +128,6 @@ export async function POST(request: Request) {
       503,
     );
   }
-
   const replicate = new Replicate({ auth: token });
   let predictionId: string | undefined;
 
@@ -151,6 +151,13 @@ export async function POST(request: Request) {
       };
       await saveTryOnJob(redis, cachedJob);
       return NextResponse.json({ jobId, status: "succeeded", resultUrl: cachedResultUrl });
+    }
+
+    if (!hasTryOnStorageConfig()) {
+      return errorResponse(
+        "Supabase Storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to the server environment.",
+        503,
+      );
     }
 
     const [humanImg, garmImg] = await Promise.all([
