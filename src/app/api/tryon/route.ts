@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { createHash, randomUUID } from "node:crypto";
 import Replicate from "replicate";
-import { Ratelimit } from "@upstash/ratelimit";
 import type { Metadata } from "sharp";
 import { getCachedGarmentResult, getCachedTryOnResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, reserveTryOnJob, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
 import { hasTryOnStorageConfig } from "@/lib/tryon-storage";
 import { isRetryableReplicateError, withReplicateRetry } from "@/lib/replicate-retry";
+import { createPredictionWithDailySpendGuard, DailyTryOnLimitError } from "@/lib/tryon-spend-guard";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -203,33 +203,6 @@ export async function POST(request: Request) {
     );
   }
 
-  const ipAddress = request.headers.get("x-real-ip")?.trim()
-    || request.headers.get("cf-connecting-ip")?.trim()
-    || "unknown";
-  const ipIdentifier = createHash("sha256").update(ipAddress).digest("hex");
-  let rateSuccess: boolean;
-  let rateReset: number;
-  try {
-    const rateLimit = new Ratelimit({
-      redis,
-      limiter: Ratelimit.slidingWindow(5, "1 h"),
-      analytics: false,
-      prefix: "closetai:tryon:rate-limit:v1",
-    });
-    const rateResult = await rateLimit.limit(ipIdentifier);
-    rateSuccess = rateResult.success;
-    rateReset = rateResult.reset;
-  } catch {
-    return errorResponse("Try-on rate limiting is temporarily unavailable. Please try again shortly.", 503);
-  }
-  if (!rateSuccess) {
-    const retryAfter = Math.max(1, Math.ceil((rateReset - Date.now()) / 1000));
-    return NextResponse.json(
-      { error: "You’ve reached the limit of 5 try-ons per hour. Please try again later." },
-      { status: 429, headers: { "Retry-After": String(retryAfter) } },
-    );
-  }
-
   let predictionId: string | undefined;
   let activeJob: TryOnJob | undefined;
 
@@ -317,15 +290,17 @@ export async function POST(request: Request) {
       withReplicateRetry(() => toModelImage(replicate, garmentPng, "garment.png")),
     ]);
 
-    const prediction = await withReplicateRetry(() => replicate.predictions.create({
-      version: MODEL_VERSION,
-      input: {
-        human_img: humanImg,
-        garm_img: garmImg,
-        garment_des: garmentDes,
-      },
-      wait: false,
-    }));
+    const prediction = await createPredictionWithDailySpendGuard(redis, () =>
+      withReplicateRetry(() => replicate.predictions.create({
+        version: MODEL_VERSION,
+        input: {
+          human_img: humanImg,
+          garm_img: garmImg,
+          garment_des: garmentDes,
+        },
+        wait: false,
+      })),
+    );
     predictionId = prediction.id;
 
     const initialStatus: TryOnStatus =
@@ -368,6 +343,13 @@ export async function POST(request: Request) {
       };
       await saveTryOnJob(redis, failureJob).catch(() => undefined);
       await releaseActiveTryOn(redis, activeJob.inputHash, activeJob.jobId).catch(() => undefined);
+    }
+
+    if (error instanceof DailyTryOnLimitError) {
+      return NextResponse.json(
+        { error: "The daily try-on limit has been reached. Please try again after midnight UTC." },
+        { status: 429, headers: { "Retry-After": String(error.retryAfter) } },
+      );
     }
 
     console.error(JSON.stringify({ event: "tryon_prediction_start_failed", retryable: isRetryableReplicateError(error) }));

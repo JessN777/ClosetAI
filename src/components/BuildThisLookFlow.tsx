@@ -44,10 +44,19 @@ export function groupTryOnPieces<T extends { category: string }>(pieces: T[]) {
   return hasFullLook || hasTopBottom ? [{ combined: true, pieces }] : pieces.map((piece) => ({ combined: false, pieces: [piece] }));
 }
 
-function shortenReason(reasons: string[], palette: string[]) {
-  const matching = reasons.filter((reason) => /\bmatches:/i.test(reason)).map((reason) => reason.split(":")[0].toLowerCase());
-  if (matching.length >= 2) return `Matches the ${palette[0] ?? "style"} palette and ${matching.slice(0, 2).join(" and ")}.`;
-  if (matching.length === 1) return `Matches the ${palette[0] ?? "style"} palette and ${matching[0]}.`;
+function shortenReason(reasons: string[], palette: string[], silhouette: string) {
+  const matching = new Set<string>();
+  if (reasons.some((reason) => /color|palette|aligns/i.test(reason))) matching.add("color");
+  if (reasons.some((reason) => /silhouette/i.test(reason))) matching.add("silhouette");
+  if (reasons.some((reason) => /category.*match/i.test(reason))) matching.add("category");
+  if (reasons.some((reason) => /formality/i.test(reason))) matching.add("formality");
+  const details = [
+    matching.has("color") ? `your ${palette[0] ?? "style"} palette` : null,
+    matching.has("silhouette") && silhouette ? `${silhouette} silhouette` : null,
+    matching.has("category") ? "the requested piece category" : null,
+    matching.has("formality") ? "the occasion's formality" : null,
+  ].filter((value): value is string => Boolean(value)).slice(0, 2);
+  if (details.length) return `Matches ${details.join(" and ")}.`;
   return reasons.find((reason) => /category|color|silhouette|formality/i.test(reason)) ?? "This piece is a close match for the style profile.";
 }
 
@@ -212,6 +221,7 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
     setProducts({}); setRenderResults([]); setRenderError(""); setError(""); setShowAlternatives(false);
     contextCallbackRef.current(null);
     setPhase("finding");
+    const profileStageTimer = window.setTimeout(() => { if (runId === runIdRef.current && !controller.signal.aborted) setPhase("building"); }, 1_200);
     try {
       const profileResponse = await fetch("/api/looks/profile", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lookName: normalized, ...(eventOccasion.trim() ? { occasion: eventOccasion.trim() } : {}) }), signal: controller.signal });
       const profilePayload = await profileResponse.json().catch(() => ({})) as ApiResponse<{ profile?: LookProfile; storedAt?: number }>;
@@ -220,10 +230,11 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
         if (profileResponse.status === 422) setShowAlternatives(true);
         throw new Error(profilePayload.error || "Could not build that look. Add more context and try again.");
       }
+      window.clearTimeout(profileStageTimer);
       setProfile(profilePayload.profile); profileRef.current = profilePayload.profile;
       setProfileCached(Boolean(profilePayload.cached));
       setPhase("building");
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 450));
       if (runId !== runIdRef.current || controller.signal.aborted) return "That request was cancelled.";
       setPhase("matching");
       const matchResponse = await fetch("/api/looks/match", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lookName: normalized }), signal: controller.signal });
@@ -235,7 +246,7 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
         matchPayload.matches.ownedMatches.forEach((match, index) => {
           const garment = garments.find((item) => item.id === match.itemId);
           if (!garment) return;
-          nextPieces.push({ id: `owned-${index}`, label: garment.name, category: categoryOf(match.targetPiece), group: "owned", closetItemId: garment.id, score: match.score, reason: shortenReason(match.reasons, profilePayload.profile!.palette), targetName: match.targetPiece });
+          nextPieces.push({ id: `owned-${index}`, label: garment.name, category: categoryOf(match.targetPiece), group: "owned", closetItemId: garment.id, score: match.score, reason: shortenReason(match.reasons, profilePayload.profile!.palette, profilePayload.profile!.silhouette), targetName: match.targetPiece });
         });
         matchPayload.matches.closeMatches.forEach((match, index) => {
           const garment = garments.find((item) => item.id === match.itemId);
@@ -265,6 +276,7 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
       setError(safe); setPhase("error"); contextCallbackRef.current(null);
       return safe;
     } finally {
+      window.clearTimeout(profileStageTimer);
       externalSignal?.removeEventListener("abort", forwardAbort);
       if (controllerRef.current === controller) controllerRef.current = null;
     }
@@ -365,7 +377,7 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
         const canTry = piece.group !== "gap" || Boolean(product);
         const checked = selectedIds.includes(piece.id);
         return <article className="build-look-piece" key={piece.id}>
-          <label className="build-look-check"><input type="checkbox" checked={checked} disabled={!canTry || rendering} onChange={() => togglePiece(piece)} /><span><strong>{piece.label}</strong><small>{piece.reason}</small>{piece.group === "close" && <em>{piece.reason}</em>}</span></label>
+          <label className="build-look-check"><input type="checkbox" checked={checked} disabled={!canTry || rendering} onChange={() => togglePiece(piece)} /><span><strong>{piece.label}</strong>{piece.group === "close" ? <em>{piece.reason}</em> : <small>{piece.reason}</small>}</span></label>
           {piece.group === "gap" && <div className="build-look-product">
             {productsLoading && !product ? <span className="build-look-unavailable">Finding a retailer option…</span> : product ? <><a href={product.href} target="_blank" rel="noreferrer" className="build-look-product-image"><img src={product.imageUrl} alt="" /></a><span><strong>{product.retailer}</strong><small>{product.price} · {product.tier} tier</small><a href={product.href} target="_blank" rel="noreferrer">View listing ↗</a></span></> : <span className="build-look-unavailable">Product unavailable · price unavailable</span>}
           </div>}
@@ -391,6 +403,7 @@ export default function BuildThisLookFlow({ garments, personPhoto, demoOffline, 
       <header><div><h3 id="build-look-profile-title">{profile.lookName}{profile.occasion ? ` · ${profile.occasion}` : ""}</h3><span className={`confidence confidence-${profile.overallConfidence}`}>{profile.overallConfidence} confidence</span></div><p>{profile.sourceAssessment.summary}</p></header>
       <div className="build-look-profile-summary"><p><strong>Shape:</strong> {profile.silhouette} · <strong>Fit:</strong> {profile.fit}</p><p><strong>Palette:</strong> {profile.palette.join(", ")}</p><p><strong>Key pieces:</strong> {profile.keyPieces.join(" · ")}</p></div>
       <div className="build-look-sources"><strong>Sources ({profile.sources.length})</strong><ul>{profile.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a><small>{source.publisher}</small></li>)}</ul></div>
+      <p className="build-look-disclaimer">This profile is based on public descriptions and may not match anyone’s exact wardrobe. Matching uses clothing metadata only; no face data or reference/person photos are sent to a matching model.</p>
       {(profile.overallConfidence === "low" || profile.sourceAssessment.status !== "sufficient") && <div className="build-look-low-confidence"><strong>Low confidence</strong><p>Some public descriptions are thin or conflict. Add an event, year, or context to narrow the result.</p><div>{alternativeStyles.map((style) => <button type="button" key={style} onClick={() => { setLookName(style); setOccasion(""); void loadLook(style); }}>{style}</button>)}</div></div>}
     </section>}
     {phase === "matching" && <p className="build-look-matching" role="status">Matching to your closet… Your sources and confidence are shown above before the pieces load.</p>}
