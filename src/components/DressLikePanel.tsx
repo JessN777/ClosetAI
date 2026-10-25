@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ClosetGarment } from "@/lib/live-garment";
 import { matchProfileToCloset, type StyleMatchLists, type StyleProfile } from "@/lib/style-profile";
-import { fetchDressLike } from "@/lib/style-profile-client";
+import { fetchClaudeDressLike } from "@/lib/claude/client";
 import { deleteSavedReferenceImage, hasSavedReferenceImage, storeReferenceImage } from "@/lib/reference-store";
 
 const fieldNames: Array<[keyof Pick<StyleProfile, "silhouette" | "fit" | "colorPalette" | "layering" | "footwear" | "accessories" | "occasions">, string]> = [
@@ -69,7 +69,7 @@ export default function DressLikePanel({ garments, hasPhoto, onSelectGarment, on
     if (!lookName.trim() || busy) return;
     setBusy(true); setError(""); setMessage("");
     try {
-      const result = await fetchDressLike(lookName.trim(), garments.map(({ id, name }) => ({ id, name })));
+      const result = await fetchClaudeDressLike(lookName.trim(), garments);
       onProfile(result.profile, result.matches);
       setMessage(result.cached ? "Loaded cached style profile." : "Built a new style profile from text sources.");
     } catch (cause) {

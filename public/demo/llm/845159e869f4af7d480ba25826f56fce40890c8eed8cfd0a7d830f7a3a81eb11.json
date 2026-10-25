@@ -1,0 +1,46 @@
+{
+  "functionName": "matchProfileToCloset",
+  "inputHash": "845159e869f4af7d480ba25826f56fce40890c8eed8cfd0a7d830f7a3a81eb11",
+  "output": {
+    "ownedMatches": [
+      {
+        "itemId": "demo-navy-jacket",
+        "targetPiece": "Relaxed tailored jacket",
+        "score": 91,
+        "scoreBreakdown": {
+          "category": 100,
+          "color": 100,
+          "silhouette": 85,
+          "formality": 75
+        },
+        "reasons": [
+          "Category matches the relaxed jacket key piece.",
+          "Navy aligns with the profile palette.",
+          "The relaxed silhouette is close to the target.",
+          "Everyday formality is a little less polished than smart casual."
+        ]
+      }
+    ],
+    "closeMatches": [],
+    "gaps": [
+      {
+        "itemDescription": "Fine knit layer",
+        "impact": "high",
+        "impactScore": 92,
+        "reason": "A light knit adds the key soft layer beneath the jacket."
+      },
+      {
+        "itemDescription": "Straight-leg trousers",
+        "impact": "medium",
+        "impactScore": 78,
+        "reason": "A clean trouser completes the tailored silhouette."
+      },
+      {
+        "itemDescription": "Leather loafers",
+        "impact": "low",
+        "impactScore": 54,
+        "reason": "Loafers are a lower-impact way to make the outfit feel more polished."
+      }
+    ]
+  }
+}

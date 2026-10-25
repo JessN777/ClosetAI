@@ -129,7 +129,7 @@ async function toModelImage(replicate: Replicate, bytes: Buffer, filename: strin
   return url;
 }
 
-function tryOnInputHash(personPng: Buffer, garmentPng: Buffer) {
+function tryOnInputHash(personPng: Buffer, garmentPng: Buffer, garmentDes: string) {
   const hash = createHash("sha256");
   const addBytes = (bytes: Buffer) => {
     const length = Buffer.alloc(8);
@@ -140,6 +140,8 @@ function tryOnInputHash(personPng: Buffer, garmentPng: Buffer) {
   hash.update(MODEL_VERSION, "utf8").update(Buffer.from([0]));
   addBytes(personPng);
   addBytes(garmentPng);
+  // Preserve existing default cache keys; include fit hints so size comparisons do not reuse another size's result.
+  if (garmentDes !== "clothing") addBytes(Buffer.from(garmentDes, "utf8"));
   return hash.digest("hex");
 }
 
@@ -237,7 +239,7 @@ export async function POST(request: Request) {
       prepareGarmentImage(garment),
     ]);
 
-    const inputHash = tryOnInputHash(personPng, garmentPng);
+    const inputHash = tryOnInputHash(personPng, garmentPng, garmentDes);
     const garmentHash = createHash("sha256").update(garmentPng).digest("hex");
     const cachedResultUrl = await getCachedTryOnResult(redis, inputHash);
     const jobId = randomUUID();

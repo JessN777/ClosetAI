@@ -1,0 +1,78 @@
+{
+  "functionName": "buildLookProfile",
+  "inputHash": "6ccdfc7d85c736451c14aa5bd18b6b79565410e7137621f22704c8245dc8e8e8",
+  "output": {
+    "lookName": "quiet luxury",
+    "occasion": null,
+    "silhouette": "Relaxed tailoring with clean, straight lines.",
+    "fit": "Comfortable proportions with softly structured layers.",
+    "palette": [
+      "navy",
+      "cream",
+      "camel",
+      "black"
+    ],
+    "layering": "A fine knit or crisp shirt under a simple tailored jacket.",
+    "footwear": [
+      "Leather loafers",
+      "Minimal ankle boots"
+    ],
+    "accessories": [
+      "Simple leather belt",
+      "Minimal jewelry"
+    ],
+    "keyPieces": [
+      "Relaxed tailored jacket",
+      "Fine knit layer",
+      "Straight-leg trousers",
+      "Leather loafers"
+    ],
+    "fieldConfidence": {
+      "silhouette": {
+        "confidence": "medium",
+        "reason": "The cached descriptions emphasize relaxed tailoring, with limited detail on exact cuts."
+      },
+      "fit": {
+        "confidence": "medium",
+        "reason": "Fit varies by brand and occasion, so this remains a broad description."
+      },
+      "palette": {
+        "confidence": "medium",
+        "reason": "Neutral and navy colors recur in the cached style references."
+      },
+      "layering": {
+        "confidence": "medium",
+        "reason": "The references describe restrained layers without a single required combination."
+      },
+      "footwear": {
+        "confidence": "low",
+        "reason": "The cached text is less specific about footwear."
+      },
+      "accessories": {
+        "confidence": "low",
+        "reason": "Accessory details are thin in the cached descriptions."
+      },
+      "keyPieces": {
+        "confidence": "medium",
+        "reason": "These are common illustrative pieces for the look, not a specific person's exact wardrobe."
+      }
+    },
+    "overallConfidence": "medium",
+    "sourceAssessment": {
+      "status": "sufficient",
+      "summary": "Two cached text sources support a broad quiet-luxury style profile. This does not describe any individual's exact wardrobe."
+    },
+    "sources": [
+      {
+        "title": "Quiet luxury style overview",
+        "url": "https://www.vogue.com/article/dos-and-donts-of-quiet-luxury-understated-elegance",
+        "publisher": "Vogue"
+      },
+      {
+        "title": "A more relaxed tailored suit",
+        "url": "https://www.theguardian.com/fashion/2024/mar/23/trend-watch-the-tailored-suit-is-back-but-more-relaxed",
+        "publisher": "The Guardian"
+      }
+    ]
+  }
+}

@@ -6,6 +6,7 @@ import VoiceAgent from "@/components/VoiceAgent";
 import ShareComposer from "@/components/ShareComposer";
 import PersonPhotoStep from "@/components/PersonPhotoStep";
 import GarmentBackgroundReview from "@/components/GarmentBackgroundReview";
+import OutfitRecommendationsPanel from "@/components/OutfitRecommendationsPanel";
 import TryOnProgress, { type TryOnStage } from "@/components/TryOnProgress";
 import TryOnResult, { type TryOnResultRecord } from "@/components/TryOnResult";
 import type { ClosetGarment } from "@/lib/live-garment";
@@ -24,14 +25,6 @@ function UploadIcon({ className = "" }: { className?: string }) {
   );
 }
 
-function CheckIcon() {
-  return <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.3 4L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-}
-
-function SparkleIcon({ className = "" }: { className?: string }) {
-  return <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2.8c.6 4.7 3 7.1 7.7 7.7-4.7.6-7.1 3-7.7 7.7-.6-4.7-3-7.1-7.7-7.7 4.7-.6 7.1-3 7.7-7.7Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/><path d="M19 15.5c.3 2.1 1.4 3.2 3.5 3.5-2.1.3-3.2 1.4-3.5 3.5-.3-2.1-1.4-3.2-3.5-3.5 2.1-.3 3.2-1.4 3.5-3.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/></svg>;
-}
-
 function TabIcon({ tab }: { tab: AppTab }) {
   const paths: Record<AppTab, ReactNode> = {
     closet: <><path d="M4 8.5 12 4l8 4.5v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5Z"/><path d="M9 20v-6a3 3 0 0 1 6 0v6M4 9l8 4 8-4"/></>,
@@ -40,78 +33,6 @@ function TabIcon({ tab }: { tab: AppTab }) {
     share: <><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5m-7.6 7.9 7.6 4.5"/></>,
   };
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[tab]}</svg>;
-}
-
-function ImageUpload({
-  kind,
-  title,
-  description,
-  image,
-  fileName,
-  onFile,
-  onRemove,
-}: {
-  kind: UploadKind;
-  title: string;
-  description: string;
-  image: string | null;
-  fileName: string | null;
-  onFile: (event: ChangeEvent<HTMLInputElement>) => void;
-  onRemove: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [dragging, setDragging] = useState(false);
-
-  return (
-    <section className="upload-section" aria-labelledby={`${kind}-heading`}>
-      <div className="upload-heading-row">
-        <div className="upload-title-wrap">
-          <span className={`step-number ${image ? "step-done" : ""}`}>{image ? <CheckIcon /> : kind === "photo" ? "01" : "02"}</span>
-          <div>
-            <h2 id={`${kind}-heading`}>{title}</h2>
-            <p>{description}</p>
-          </div>
-        </div>
-        {image && <button type="button" className="text-button" onClick={onRemove}>Remove</button>}
-      </div>
-
-      <button
-        type="button"
-        className={`dropzone ${image ? "has-image" : ""} ${dragging ? "is-dragging" : ""}`}
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setDragging(false);
-          const file = event.dataTransfer.files?.[0];
-          if (file && inputRef.current) {
-            const transfer = new DataTransfer();
-            transfer.items.add(file);
-            inputRef.current.files = transfer.files;
-            inputRef.current.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-        }}
-        aria-label={image ? `Replace ${title.toLowerCase()}` : `Upload ${title.toLowerCase()}`}
-      >
-        {image ? (
-          <>
-            <img src={image} alt={`Preview of ${title.toLowerCase()}`} className={`upload-preview ${kind === "photo" ? "person-preview" : "garment-preview"}`} />
-            <span className="preview-scrim" />
-            <span className="preview-label"><span className="preview-dot" /> {fileName}</span>
-            <span className="replace-hint"><UploadIcon /> Replace image</span>
-          </>
-        ) : (
-          <span className="empty-upload">
-            <span className="upload-icon-box"><UploadIcon /></span>
-            <span className="upload-copy"><strong>Click to upload <span>or drag and drop</span></strong><small>JPG, PNG or WEBP <i>·</i> under 8 MB</small></span>
-            <span className="plus-mark" aria-hidden="true">+</span>
-          </span>
-        )}
-      </button>
-      <input ref={inputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={onFile} aria-label={`Choose ${title.toLowerCase()} image`} />
-    </section>
-  );
 }
 
 export default function Home() {
@@ -127,7 +48,6 @@ export default function Home() {
   const [status, setStatus] = useState<"idle" | "loading" | "result" | "error">("idle");
   const [message, setMessage] = useState("");
   const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [resultCached, setResultCached] = useState(false);
   const [demoOffline, setDemoOffline] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareActionId, setShareActionId] = useState<string | null>(null);
@@ -206,12 +126,21 @@ export default function Home() {
     return true;
   }
 
+  function persistClosetItem(method: "POST" | "DELETE", value: ClosetGarment | string) {
+    if (document.documentElement.dataset.demoOffline === "true") return;
+    const body = method === "POST" && typeof value !== "string"
+      ? { item: { id: value.id, name: value.name } }
+      : { id: typeof value === "string" ? value : value.id };
+    void fetch("/api/closet", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      .then((response) => { if (!response.ok) console.error(JSON.stringify({ event: method === "POST" ? "closet_item_save_failed" : "closet_item_delete_failed", status: response.status })); })
+      .catch(() => console.error(JSON.stringify({ event: method === "POST" ? "closet_item_save_failed" : "closet_item_delete_failed" })));
+  }
+
   function clearResult() {
     cancelPendingRequest();
     setMessage("");
     setStatus("idle");
     setResultUrl(null);
-    setResultCached(false);
     setCurrentResult(null);
     setShareUrl(null);
     setShareActionId(null);
@@ -223,6 +152,7 @@ export default function Home() {
     clearResult();
     const item: ClosetGarment = { id: crypto.randomUUID(), url: URL.createObjectURL(file), name: file.name, file };
     setCloset((items) => [...items, item]);
+    persistClosetItem("POST", item);
     setGarment(item);
     garmentRef.current = item;
     if (activeTab === "tryon") setGuidedStep(2);
@@ -241,6 +171,7 @@ export default function Home() {
     const removed = closet.find((item) => item.id === id);
     if (removed) URL.revokeObjectURL(removed.url);
     setCloset((items) => items.filter((item) => item.id !== id));
+    persistClosetItem("DELETE", id);
     setPreparedGarmentIds((ids) => { const next = new Set(ids); next.delete(id); return next; });
     if (garment?.id === id) { garmentRef.current = null; setGarment(null); }
   }
@@ -270,6 +201,7 @@ export default function Home() {
       URL.revokeObjectURL(accepted.url);
       accepted = { ...accepted, file: processed, url: nextUrl };
       setCloset((items) => items.map((item) => item.id === accepted.id ? accepted : item));
+      persistClosetItem("POST", accepted);
       setGarment(accepted);
       garmentRef.current = accepted;
     }
@@ -313,7 +245,6 @@ export default function Home() {
     setStatus("loading");
     setMessage("");
     setResultUrl(null);
-    setResultCached(false);
     setCurrentResult(null);
     setShareUrl(null);
     setShareActionId(null);
@@ -341,7 +272,7 @@ export default function Home() {
       const parsedSize = sizeHint?.match(/size\s+([a-z0-9]+)/i)?.[1]?.toUpperCase();
       const record: TryOnResultRecord = { id: crypto.randomUUID(), url, cached, garmentId, garmentName: name, personFile, whyFits: buildWhyFits(name), createdAt: Date.now(), ...(parsedSize ? { size: parsedSize } : {}) };
       setRecentResults((items) => [record, ...items.filter((item) => item.id !== record.id)].slice(0, 3));
-      setCurrentResult(record); setResultUrl(url); setResultCached(cached); setMessage(""); setStatus("result");
+      setCurrentResult(record); setResultUrl(url); setMessage(""); setStatus("result");
       const duration = Date.now() - startedAt;
       if (!cached && duration >= 3_000) {
         try {
@@ -462,16 +393,30 @@ export default function Home() {
     }
   }
 
-  function resetForm() {
+  function tryAnotherPiece() {
+    const items = closetRef.current;
+    const next = items.find((item) => item.id !== garmentRef.current?.id);
+    clearResult();
+    setMode("photo"); setGuidedStep(2);
+    if (!next) { setActiveTab("closet"); return; }
+    setActiveTab("tryon");
+    garmentRef.current = next; setGarment(next);
+  }
+
+  function selectRecentResult(item: TryOnResultRecord) {
     cancelPendingRequest();
-    setPhoto(null);
-    if (mode === "photo") { garmentRef.current = null; setGarment(null); }
-    setResultUrl(null);
-    setResultCached(false);
-    setShareUrl(null);
-    setShareActionId(null);
-    setMessage("");
-    setStatus("idle");
+    const nextPhoto = { file: item.personFile, name: item.personFile.name || "Your photo", url: URL.createObjectURL(item.personFile) };
+    setPhoto(nextPhoto);
+    const nextGarment = closetRef.current.find((piece) => piece.id === item.garmentId) ?? null;
+    if (nextGarment) { setGarment(nextGarment); garmentRef.current = nextGarment; }
+    else { setGarment(null); garmentRef.current = null; }
+    setCurrentResult(item); setResultUrl(item.url); setMessage(""); setStatus("result"); setMode("photo"); setGuidedStep(2); setActiveTab("tryon");
+  }
+
+  function tryDifferentSize(size: string) {
+    if (!photo || !garment) return;
+    setMode("photo"); setGuidedStep(2);
+    void generateLook(photo.file, garment.file, garment.id, undefined, `size ${size}`);
   }
 
   function navigate(tab: AppTab) {
@@ -509,32 +454,40 @@ export default function Home() {
         {activeTab === "tryon" && <section className="app-screen" aria-labelledby="tryon-title">
           <div className="screen-heading"><span className="screen-eyebrow">VIRTUAL FITTING ROOM</span><h1 id="tryon-title">Try-on</h1><p>See one of your closet pieces on you.</p></div>
           <div className="tryon-modes app-mode-switch" role="group" aria-label="Try-on mode">
-            <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("photo"); }}>Photo</button>
-            <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("live"); }}>Live camera</button>
+            <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => setMode("photo")}>Photo</button>
+            <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => setMode("live")}>Live camera</button>
           </div>
-          {status === "result" && resultUrl ? <section className="tryon-result-screen">
-            <span className="screen-eyebrow">YOUR NEW LOOK{resultCached ? " · CACHED" : ""}</span><img className="result-image" src={resultUrl} alt="Your virtual try-on result" onError={() => { setMessage("We couldn’t load the result image. Please try again."); setStatus("error"); }} />
-            <p className="result-caption">{resultCached ? "Showing your saved look while live rendering is unavailable." : "Your look is ready."}</p>
-            <button className="primary-cta" type="button" onClick={resetForm}>Try another look</button>
-          </section> : mode === "live" ? <div className="tryon-live-screen">
-            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={status === "loading"} demoOffline={demoOffline} />
-            {(status === "loading" || status === "error") && <p className={`live-job-message ${status === "error" ? "error-message" : ""}`} role={status === "error" ? "alert" : "status"}>{message || "Generating your look…"}</p>}
-          </div> : <form className="tryon-form" aria-label="Virtual try-on setup" aria-busy={status === "loading"} onSubmit={handleTryOn}>
-            <ImageUpload kind="photo" title="Your photo" description="Full-body and front-facing works best" image={photo?.url ?? null} fileName={photo?.name ?? null} onFile={(event) => setUpload("photo", event)} onRemove={() => removeUpload("photo")} />
-            <section className="garment-picker" aria-labelledby="garment-picker-title">
-              <div className="picker-heading"><h2 id="garment-picker-title">Choose a garment</h2>{garment && <span>Selected</span>}</div>
-              {closet.length ? <div className="garment-picker-list">{closet.map((item) => <button className={`garment-choice ${garment?.id === item.id ? "is-selected" : ""}`} type="button" key={item.id} aria-pressed={garment?.id === item.id} onClick={() => selectGarment(item.id)}><img src={item.url} alt="" /><span>{item.name}</span><i aria-hidden="true">{garment?.id === item.id ? "✓" : "○"}</i></button>)}</div> : <div className="inline-empty"><p>Add your first garment in the Closet tab to use the fitting room.</p></div>}
-            </section>
-            {status === "error" && <p className="screen-error" role="alert">{message}</p>}
-            <button className="primary-cta tryon-primary" type={closet.length ? "submit" : "button"} onClick={closet.length ? undefined : () => navigate("closet")} disabled={status === "loading" || (closet.length > 0 && !ready)}>
-              {status === "loading" ? <><span className="loading-spinner" aria-hidden="true" />Generating your look…</> : closet.length ? <><SparkleIcon />Try it on</> : "Add a garment first"}
-            </button>
-            {status === "loading" ? <p className="screen-hint" role="status">{message || "Generating your look…"}</p> : <p className="screen-hint">{ready ? `Ready to try on ${garment?.name}.` : "Add your photo and select a garment to continue."}</p>}
-          </form>}
+          {status === "loading" ? <TryOnProgress stage={progressStage} personPhotoUrl={photo?.url ?? null} startedAt={tryOnStartedAt} averageDurationMs={averageDurationMs} /> : status === "result" && currentResult && resultUrl && mode === "photo" ? <TryOnResult
+            result={currentResult}
+            history={recentResults}
+            defaultSize={fitPreferences.sizes.top ?? fitPreferences.sizes.general ?? "M"}
+            canTryDifferentSize={Boolean(garment && currentResult.garmentId === garment.id)}
+            onSelectHistory={selectRecentResult}
+            onTryAnotherPiece={tryAnotherPiece}
+            onTryDifferentSize={tryDifferentSize}
+            onShare={() => navigate("share")}
+            onResultError={() => { setMessage("The saved image could not be loaded. Try another result or render again."); setStatus("error"); }}
+          /> : mode === "live" ? <div className="tryon-live-screen">
+            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={false} demoOffline={demoOffline} />
+            {status === "error" && <p className="live-job-message error-message" role="alert">{message}</p>}
+            {status === "result" && <p className="live-job-message" role="status">Quick CV overlay preview · the high-quality render is saved in Photo.</p>}
+          </div> : <div className="tryon-guided-flow">
+            <div className="guided-step-switch" aria-label={`Step ${guidedStep} of 2`}><span className={guidedStep === 1 ? "is-active" : "is-complete"}><b>1</b> Photo</span><i aria-hidden="true" /><span className={guidedStep === 2 ? "is-active" : photo ? "is-complete" : ""}><b>2</b> Garment</span></div>
+            {guidedStep === 1 ? <>
+              <PersonPhotoStep photo={photo} demoOffline={demoOffline} onPhoto={(file) => { if (!validateUpload(file)) return; clearResult(); setPhoto({ url: URL.createObjectURL(file), name: file.name, file }); }} onRemove={() => removeUpload("photo")} onContinue={() => setGuidedStep(2)} />
+              {status === "error" && <p className="screen-error guided-flow-error" role="alert">{message}</p>}
+            </> : <>
+              <GarmentBackgroundReview garments={closet} selectedId={garment?.id ?? null} isPrepared={Boolean(garment && preparedGarmentIds.has(garment.id))} demoOffline={demoOffline} onSelect={selectGarment} onUpload={addGarment} onAccept={acceptGarmentBackground} />
+              {status === "error" && <p className="screen-error guided-flow-error" role="alert">{message}</p>}
+              <div className="guided-flow-footer"><button type="button" className="secondary-cta" onClick={() => setGuidedStep(1)}>Back to photo</button><button type="button" className="primary-cta" disabled={!photo || !garment || !preparedGarmentIds.has(garment.id)} onClick={() => { if (photo && garment) void generateLook(photo.file, garment.file, garment.id); }}>{closet.length && garment ? "Generate high-quality look" : "Choose a garment first"}</button></div>
+              {ready && <p className="screen-hint guided-ready-note">Ready to render {garment?.name}. The server reuses the existing cached try-on flow.</p>}
+            </>}
+          </div>}
         </section>}
 
         {activeTab === "shop" && <section className="app-screen" aria-labelledby="shop-title">
           <div className="screen-heading"><span className="screen-eyebrow">INSPIRED BY YOUR STYLE</span><h1 id="shop-title">Shop</h1><p>Build a look from public style descriptions, then find pieces you own or can shop.</p></div>
+          <OutfitRecommendationsPanel garments={closet} preferences={fitPreferences} demoOffline={demoOffline} />
         </section>}
 
         {activeTab === "share" && <section className="app-screen" aria-labelledby="share-screen-title">
@@ -543,11 +496,11 @@ export default function Home() {
             <img className="result-image" src={resultUrl} alt="Your shared try-on" /><div><span className="screen-eyebrow">POST SAVED</span><h2>Your look is ready to share</h2><a className="primary-cta" href={shareUrl} target="_blank" rel="noreferrer">Open share page <span aria-hidden="true">↗</span></a><button type="button" className="secondary-cta" onClick={() => void navigator.clipboard?.writeText(shareUrl)}>Copy link</button></div>
           </div> : <>
             <img className="share-source-image" src={resultUrl} alt="Try-on result to share" />
-            {shareActionId && <ShareComposer actionId={shareActionId} imageUrl={resultUrl} garmentName={garment?.name ?? "your new look"} onSaved={setShareUrl} onCancel={() => { setShareActionId(null); navigate("tryon"); }} />}
+            {shareActionId && <ShareComposer actionId={shareActionId} imageUrl={resultUrl} garmentName={currentResult?.garmentName ?? garment?.name ?? "your new look"} onSaved={setShareUrl} onCancel={() => { setShareActionId(null); navigate("tryon"); }} />}
           </>}
         </section>}
 
-        <VoiceAgent garments={closet} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} demoOffline={demoOffline} activeTab={activeTab} />
+        <VoiceAgent garments={closet} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} demoOffline={demoOffline} activeTab={activeTab} onPreferencesChange={setFitPreferences} />
       </div>
 
       <nav className="bottom-nav" aria-label="Main navigation">

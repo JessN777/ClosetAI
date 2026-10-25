@@ -14,10 +14,11 @@ export type TryOnResultRecord = {
   size?: string;
 };
 
-export default function TryOnResult({ result, history, defaultSize, onSelectHistory, onTryAnotherPiece, onTryDifferentSize, onShare }: {
+export default function TryOnResult({ result, history, defaultSize, canTryDifferentSize, onSelectHistory, onTryAnotherPiece, onTryDifferentSize, onShare, onResultError }: {
   result: TryOnResultRecord; history: TryOnResultRecord[]; defaultSize: string;
+  canTryDifferentSize: boolean;
   onSelectHistory: (item: TryOnResultRecord) => void; onTryAnotherPiece: () => void;
-  onTryDifferentSize: (size: string) => void; onShare: () => void;
+  onTryDifferentSize: (size: string) => void; onShare: () => void; onResultError: () => void;
 }) {
   const [beforeUrl, setBeforeUrl] = useState("");
   const [slider, setSlider] = useState(50);
@@ -52,7 +53,7 @@ export default function TryOnResult({ result, history, defaultSize, onSelectHist
     <div className="tryon-result-heading"><div><span className="screen-eyebrow">YOUR NEW LOOK{result.cached ? " · CACHED" : ""}</span><h2 id="tryon-result-title">{result.garmentName}</h2></div>{result.size && <span className="result-size-badge">Size {result.size}</span>}</div>
     <div className="tryon-before-after" style={{ "--compare-position": `${slider}%` } as CSSProperties}>
       {beforeUrl && <img className="compare-before-image" src={beforeUrl} alt="Before: your original photo" />}
-      <img className="compare-after-image" src={result.url} alt="After: your virtual try-on" />
+      <img className="compare-after-image" src={result.url} alt="After: your virtual try-on" onError={onResultError} />
       <div className="compare-split-line" aria-hidden="true"><span /></div>
       <span className="compare-label compare-label-before">Before</span><span className="compare-label compare-label-after">After</span>
     </div>
@@ -60,13 +61,13 @@ export default function TryOnResult({ result, history, defaultSize, onSelectHist
     <input id="tryon-compare-slider" className="compare-slider" type="range" min="0" max="100" value={slider} onChange={(event) => setSlider(Number(event.currentTarget.value))} aria-label="Slide to compare your original photo and try-on result" />
     <p className="why-this-fits"><strong>Why this fits</strong><span>{result.whyFits}</span></p>
     <div className="tryon-result-actions" aria-label="Try-on actions">
-      <button type="button" className="result-action" onClick={() => setSizeMenuOpen((open) => !open)}><span aria-hidden="true">↕</span>Try a different size</button>
-      <button type="button" className="result-action" onClick={onTryAnotherPiece}><span aria-hidden="true">＋</span>Try another piece</button>
+      <button type="button" className="result-action" disabled={!canTryDifferentSize} title={!canTryDifferentSize ? "Add this garment back to your closet to render another size." : undefined} onClick={() => setSizeMenuOpen((open) => !open)}><span aria-hidden="true">↕</span>Try a different size</button>
+      <button type="button" className="result-action result-action-primary" onClick={onTryAnotherPiece}><span aria-hidden="true">＋</span>Try another piece</button>
       <button type="button" className="result-action" onClick={saveLook}><span aria-hidden="true">{saved ? "✓" : "♡"}</span>{saved ? "Saved look" : "Save look"}</button>
       <button type="button" className="result-action result-action-share" onClick={onShare}><span aria-hidden="true">↗</span>Share</button>
     </div>
     {sizeMenuOpen && <div className="result-size-picker"><label htmlFor="tryon-size-select">Size to render</label><select id="tryon-size-select" value={size} onChange={(event) => setSize(event.currentTarget.value)}>{sizes.map((item) => <option key={item} value={item}>{item}</option>)}</select><button type="button" className="secondary-cta" onClick={() => onTryDifferentSize(size)}>Render size {size}</button><small>Size is sent as a fit hint to the try-on model; the result is an estimate.</small></div>}
     <p className="result-caption">{result.cached ? "Showing a saved look for this garment." : "Your high-quality render is ready."}</p>
-    {history.length > 1 && <div className="tryon-result-history-wrap"><h3>Recent looks <span>Compare your last {history.length}</span></h3><div className="tryon-result-history" aria-label="Recent try-on results">{history.map((item) => <button type="button" key={item.id} className={`tryon-history-card ${item.id === result.id ? "is-current" : ""}`} aria-pressed={item.id === result.id} onClick={() => onSelectHistory(item)}><img src={item.url} alt="" /><span>{item.garmentName}</span>{item.size && <small>Size {item.size}</small>}</button>)}</div></div>}
+    {history.length > 0 && <div className="tryon-result-history-wrap"><h3>Recent looks <span>Compare your last {history.length} of 3</span></h3><div className="tryon-result-history" aria-label="Recent try-on results">{history.map((item) => <button type="button" key={item.id} className={`tryon-history-card ${item.id === result.id ? "is-current" : ""}`} aria-pressed={item.id === result.id} onClick={() => onSelectHistory(item)}><img src={item.url} alt="" /><span>{item.garmentName}</span>{item.size && <small>Size {item.size}</small>}</button>)}</div></div>}
   </section>;
 }

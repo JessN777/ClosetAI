@@ -4,6 +4,8 @@ ClosetAI is a Next.js virtual try-on demo. The try-on route preprocesses the upl
 
 ## Environment variables
 
+Set ANTHROPIC_API_KEY in the server environment for the Claude styling routes. CLAUDE_MODEL is optional and defaults to claude-sonnet-5-5. Never prefix the key with NEXT_PUBLIC_ or send it to the browser.
+
 Copy `.env.example` to `.env.local` and set:
 
 - `REPLICATE_API_TOKEN` from your Replicate account.
@@ -14,7 +16,7 @@ Copy `.env.example` to `.env.local` and set:
 - `SERPAPI_API_KEY` is optional and enables live Google Shopping product listings for **Shop the look**. Without it, the flow still shows cited pieces and closet matches, with a clear product-search-unavailable message.
 - `NEXT_PUBLIC_SITE_URL` is optional and should be the public app origin in production, for example `https://closet.example`.
 
-All five variables are required server-side. Do not prefix them with `NEXT_PUBLIC_` or expose their values to the browser. Create a public Supabase Storage bucket named `tryon-results`; files in it are readable by anyone with the URL. Generated PNGs are stored as `<input-sha256>.png`, and their public URLs are saved in Redis.
+Keep credentials server-side. Do not prefix them with `NEXT_PUBLIC_` or expose their values to the browser. Create a public Supabase Storage bucket named `tryon-results`; files in it are readable by anyone with the URL. Generated PNGs are stored as `<input-sha256>.png`, and their public URLs are saved in Redis.
 
 ## Job lifecycle
 
@@ -23,6 +25,13 @@ All five variables are required server-side. Do not prefix them with `NEXT_PUBLI
 The browser polls `GET /api/tryon/:id` every two seconds for up to 90 seconds. A short Redis poll lock prevents simultaneous status requests from downloading and uploading the same result, and job updates cannot overwrite a newer or terminal status. On success, the Replicate output is saved to Supabase Storage and the permanent public URL is stored in the job and cached by SHA-256 of the normalized person PNG, processed garment PNG, and model version. Jobs expire after 24 hours. Model failures are not cached; storage failures are returned with `retryable: true` so the user can submit again.
 
 ## API
+
+Additional styling routes:
+
+- POST /api/outfits/recommend accepts an occasion and weather, then loads the signed user's closet metadata and preferences from Upstash Redis.
+- POST /api/looks/profile accepts a look name and optional occasion, builds a cited profile, and caches it by normalized name for 30 days. Set force to true to rebuild.
+- POST /api/looks/match accepts a look name and matches its stored profile to the signed user's closet.
+- GET, POST, and DELETE /api/closet read, save, or remove the signed user's closet metadata. Image files stay in the current browser session; Claude receives garment names and optional attributes only.
 
 - `POST /api/tryon` accepts multipart form data with `photo` and `garment` image fields, then returns `{ "jobId": "..." }` with HTTP 202 after the job is reserved and saved.
 - `GET /api/tryon/:id` returns `{ "status": "queued" | "processing" | "succeeded" | "failed" }`, with `resultUrl` on success or `error` on failure.
@@ -41,6 +50,14 @@ Set `DEMO_OFFLINE=1` in `.env.local` and restart the app to replay the bundled a
 
 After a try-on succeeds, choose **Share this look** to preview a center-cropped 9:16 Story or 1:1 Square image. The server suggests a short caption and hashtags using only the garment filename/description; it does not send the try-on image to the caption model. Captions and hashtags are editable, and browser speech recognition can transcribe an optional one-line voice caption. Choose **Save & get share link** to upload the selected PNG crop to the public `tryon-results` Supabase bucket under `shares/` and save its caption, hashtags, crop, and timestamp in Upstash Redis. The resulting `/share/:id` page includes Open Graph and Twitter metadata, and `/share/:id/opengraph-image` serves a 1200×630 preview. Share links and images are public to anyone who has the URL. If caption generation is offline, users can write their own; if saving fails, the crop remains downloadable, the caption has a copy action, and the form stays available for retry.
 
+## Claude decision layer
+
+The server-only decision layer is in src/lib/claude/. It exports recommendOutfit, buildLookProfile, and matchProfileToCloset, and validates every model result with Zod. Claude web search is required for style profiles, which need at least two source URLs and disclose thin or conflicting evidence. The decision layer receives text and closet metadata only; photos and facial features are not used.
+
+The Shop tab's Outfit ideas panel calls POST /api/outfits/recommend and shows loading, error, and Cached states. The Dress like panel calls POST /api/looks/profile and POST /api/looks/match. Recommendations are cached for ten minutes, closet matches for one hour, and profiles for 30 days. Claude routes allow 20 model calls per user per hour and return 429 with Retry-After when limited. A route logs one structured JSON line with route, cache status, model, token counts, duration, and error code; prompts and personal data are excluded.
+
+With DEMO_OFFLINE=1, the Claude functions load scripted JSON responses from public/demo/llm using a SHA-256 hash of the canonical function input. Regenerate the checked-in fixtures with npx tsx scripts/generate-claude-demo-cache.ts.
+
 ## Voice assistant
 
 The home page includes a voice assistant with Web Speech API input and browser text-to-speech output. It sends the transcript, current session closet item IDs/names, and persistent preference profile to `POST /api/voice`. The server injects the profile into each LLM request and uses function calling for `search_closet`, `suggest_outfit`, `start_tryon`, `search_shopping`, `remember_preference`, and `dress_like`; the browser executes those actions against the current closet and try-on state. Shopping prepares a click-through search and never buys anything. Preferences are stored in Upstash Redis under a signed, HTTP-only anonymous user cookie with versioned writes. Users can save favorite colors, fit, occasions, sizes, and a budget by voice or text. The optional style-notes field accepts a text description to match with closet pieces; reference images are not sent to an LLM. The short action log is session UI state.
@@ -57,9 +74,9 @@ The agent calls the authenticated `/api/voice-tools/closet/search`, `/closet/sug
 
 ## Dress like
 
-The Dress like panel accepts a look or style name, calls `buildStyleProfile(lookName)`, and uses OpenAI Responses web search to create a structured profile from public text sources only. The profile includes silhouette, fit, color palette, layering, footwear, accessories, occasions, key pieces, source assessment, and field-level confidence/evidence. A profile is accepted only when at least two distinct HTTPS source URLs are returned. Conflicting/thin evidence is disclosed and lowers confidence. Profiles are cached in Upstash Redis under a SHA-256 hash of the normalized look name; a short Redis lock avoids simultaneous duplicate builds. Failed builds are not cached. Configure `OPENAI_API_KEY`, optional `OPENAI_STYLE_MODEL`, and the already-required Upstash Redis environment variables.
+The Dress like panel accepts a look or style name, calls POST /api/looks/profile and POST /api/looks/match, which use Claude web search to create a structured profile from public text sources only. The profile includes silhouette, fit, palette, layering, footwear, accessories, key pieces, source assessment, and field-level confidence. A profile is accepted only when at least two distinct HTTPS source URLs are returned. Conflicting/thin evidence is disclosed and lowers confidence. Profiles are stored in Upstash Redis per signed user and normalized look name for 30 days, with a force option. Failed builds are not cached. Configure `ANTHROPIC_API_KEY`, optional `CLAUDE_MODEL`, and the already-required Upstash Redis environment variables.
 
-`matchProfileToCloset(profile, closetItems)` scores category (35%), color (25%), silhouette (25%), and formality (15%), returning owned matches, close matches with a suggested tweak, and shopping gaps ordered by impact. The UI shows reasons for each score, links the used sources, and labels overall and field confidence. Selecting an owned/close closet item sets the garment for the existing try-on, which uses only the user's own photo and selected closet garment. Profiles are based on public descriptions and may not match a person's exact wardrobe.
+`matchProfileToCloset(profile, closetItems)` scores category, color, silhouette, and formality, returning owned matches, close matches with a suggested tweak, and shopping gaps ordered by impact. The UI shows reasons for each score, links the used sources, and labels overall and field confidence. Selecting an owned/close closet item sets the garment for the existing try-on, which uses only the user's own photo and selected closet garment. Profiles are based on public descriptions and may not match a person's exact wardrobe.
 
 Reference images require the user to attest they own the image or have rights to it. Processing is local in the browser: it samples approximate colors only, creates a low-confidence profile in the same JSON shape, and never uploads image bytes or uses face recognition/face data. The image is discarded after extraction unless the user checks **Keep a copy in this browser**, which saves it only to local IndexedDB. The explicit delete action removes that browser-local copy. Local reference images are not used in try-on. The offline demo has a cached **Quiet luxury** profile and matches; see [`DEMO.md`](./DEMO.md#dress-like).
 

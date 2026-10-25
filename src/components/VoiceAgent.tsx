@@ -32,7 +32,7 @@ const emptyPreferences: Preferences = { favoriteColors: [], fit: [], occasions: 
 
 const stateCopy: Record<VoiceState, string> = { idle: "Ready when you are", listening: "Listening…", thinking: "Thinking…", speaking: "Speaking…" };
 
-export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSelectGarment, onTryOn, demoOffline = false, activeTab }: {
+export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSelectGarment, onTryOn, demoOffline = false, activeTab, onPreferencesChange }: {
   garments: ClosetGarment[];
   selectedGarmentId: string | null;
   hasPhoto: boolean;
@@ -40,6 +40,7 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   onTryOn: (garmentId?: string, turnSignal?: AbortSignal) => void;
   demoOffline?: boolean;
   activeTab: "closet" | "tryon" | "shop" | "share";
+  onPreferencesChange?: (profile: Pick<Preferences, "favoriteColors" | "fit" | "sizes">) => void;
 }) {
   const [state, setState] = useState<VoiceState>("idle");
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -68,6 +69,8 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   const demoPlaybackRef = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  useEffect(() => { onPreferencesChange?.({ favoriteColors: preferences.favoriteColors, fit: preferences.fit, sizes: preferences.sizes }); }, [preferences, onPreferencesChange]);
 
   useEffect(() => { setSheetOpen(false); }, [activeTab]);
 
