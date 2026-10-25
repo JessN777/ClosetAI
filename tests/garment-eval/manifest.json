@@ -1,0 +1,15 @@
+{
+  "status": "awaiting licensed photo fixtures",
+  "cases": [
+    { "id": "hanger-shirt", "category": "garment on a hanger", "file": "inputs/hanger-shirt.jpg" },
+    { "id": "hanger-coat", "category": "garment on a hanger", "file": "inputs/hanger-coat.jpg" },
+    { "id": "flat-lay-knit", "category": "flat lay", "file": "inputs/flat-lay-knit.jpg" },
+    { "id": "flat-lay-pattern", "category": "patterned flat lay", "file": "inputs/flat-lay-pattern.jpg" },
+    { "id": "worn-front", "category": "worn garment", "file": "inputs/worn-front.jpg" },
+    { "id": "worn-sleeve", "category": "worn garment with visible hand", "file": "inputs/worn-sleeve.jpg" },
+    { "id": "mirror-selfie", "category": "mirror selfie", "file": "inputs/mirror-selfie.jpg" },
+    { "id": "busy-room", "category": "busy background", "file": "inputs/busy-room.jpg" },
+    { "id": "pattern-stripes", "category": "patterned clothing", "file": "inputs/pattern-stripes.jpg" },
+    { "id": "pattern-floral", "category": "patterned clothing", "file": "inputs/pattern-floral.jpg" }
+  ]
+}

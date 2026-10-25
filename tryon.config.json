@@ -1,0 +1,69 @@
+{
+  "defaultModel": "idm-vton",
+  "displayMinSide": 1024,
+  "garmentMinShortSide": 512,
+  "garmentSegmentation": {
+    "label": "BiRefNet general garment matte",
+    "version": "21f2c4a9159af128ab9b9126401eebe7f8c5310841ed628b74a4c462df00da67",
+    "checkedOn": "2026-10-25",
+    "source": "https://replicate.com/sprited/birefnet/versions/21f2c4a9159af128ab9b9126401eebe7f8c5310841ed628b74a4c462df00da67/api",
+    "variant": "general",
+    "resolution": 0,
+    "outputFormat": "mask",
+    "maskBlur": 0,
+    "maskOffset": 0,
+    "refineForeground": true,
+    "precision": "fp32",
+    "maxDurationMs": 35000
+  },
+  "models": {
+    "idm-vton": {
+      "label": "IDM-VTON",
+      "version": "0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985",
+      "checkedOn": "2026-10-25",
+      "source": "https://replicate.com/cuuupid/idm-vton/api",
+      "personWidth": 768,
+      "personHeight": 1024,
+      "expectsDensePose": false,
+      "personField": "human_img",
+      "garmentField": "garm_img",
+      "maskField": "mask_img",
+      "descriptionField": "garment_des",
+      "extra": { "category": "upper_body", "crop": false }
+    },
+    "oot-diffusion": {
+      "label": "OOTDiffusion with mask",
+      "version": "c890e02d8180bde7eeed1a138217ee154d8cdd8769a29f02bd51fea33d268385",
+      "checkedOn": "2026-10-25",
+      "source": "https://replicate.com/viktorfa/oot_diffusion_with_mask/api",
+      "personWidth": 768,
+      "personHeight": 1024,
+      "expectsDensePose": false,
+      "personField": "model_image",
+      "garmentField": "garment_image",
+      "maskField": "person_mask",
+      "extra": {}
+    }
+  },
+  "parsing": {
+    "label": "Grounded SAM clothes and body masks",
+    "version": "ee871c19efb1941f55f66a3d7d960428c8a5afcb77449547fe8e5a3ab9ebc21c",
+    "checkedOn": "2026-10-25",
+    "source": "https://replicate.com/schananas/grounded_sam/api",
+    "imageField": "image",
+    "promptField": "mask_prompt",
+    "bodyPrompt": "person",
+    "clothingPrompt": "upper clothes,pants,skirt,dress"
+  },
+  "upscale": {
+    "label": "Real-ESRGAN",
+    "version": "b3ef194191d13140337468c916c2c5b96dd0cb06dffc032a022a31807f6a5ea8",
+    "checkedOn": "2026-10-25",
+    "source": "https://replicate.com/nightmareai/real-esrgan/api",
+    "imageField": "image",
+    "scaleField": "scale",
+    "scale": 2,
+    "faceEnhanceField": "face_enhance",
+    "faceEnhance": false
+  }
+}

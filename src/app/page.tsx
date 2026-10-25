@@ -5,11 +5,13 @@ import LiveTryOn from "@/components/LiveTryOn";
 import VoiceAgent from "@/components/VoiceAgent";
 import ShareComposer from "@/components/ShareComposer";
 import PersonPhotoStep from "@/components/PersonPhotoStep";
-import GarmentBackgroundReview from "@/components/GarmentBackgroundReview";
+import GarmentCutoutReview, { type PendingGarmentCutout } from "@/components/GarmentCutoutReview";
 import OutfitRecommendationsPanel from "@/components/OutfitRecommendationsPanel";
 import TryOnProgress, { type TryOnStage } from "@/components/TryOnProgress";
 import TryOnResult, { type TryOnResultRecord } from "@/components/TryOnResult";
-import type { ClosetGarment } from "@/lib/live-garment";
+import ClosetLoadingSkeleton from "@/components/ClosetLoadingSkeleton";
+import { approximateWhiteBackgroundCutout, type ClosetGarment } from "@/lib/live-garment";
+import { useCloset } from "@/hooks/useCloset";
 import { RunEpoch } from "@/lib/run-epoch";
 
 type UploadKind = "photo" | "garment";
@@ -37,12 +39,14 @@ function TabIcon({ tab }: { tab: AppTab }) {
 
 export default function Home() {
   const requestController = useRef<AbortController | null>(null);
+  const sessionInitRef = useRef<Promise<Partial<FitPreferences> | null> | null>(null);
   const runEpochRef = useRef(new RunEpoch());
   const closetRef = useRef<ClosetGarment[]>([]);
   const garmentRef = useRef<ClosetGarment | null>(null);
+  const [personalSessionReady, setPersonalSessionReady] = useState(false);
+  const { items: closet, loading: closetLoading, error: closetError, addItem: addClosetItem, removeItem: removeClosetItem, setDemoItems } = useCloset({ enabled: personalSessionReady });
   const [mode, setMode] = useState<"photo" | "live">("photo");
   const [activeTab, setActiveTab] = useState<AppTab>("closet");
-  const [closet, setCloset] = useState<ClosetGarment[]>([]);
   const [photo, setPhoto] = useState<Upload | null>(null);
   const [garment, setGarment] = useState<ClosetGarment | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "result" | "error">("idle");
@@ -52,20 +56,20 @@ export default function Home() {
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareActionId, setShareActionId] = useState<string | null>(null);
   const [guidedStep, setGuidedStep] = useState<1 | 2>(1);
-  const [preparedGarmentIds, setPreparedGarmentIds] = useState<Set<string>>(() => new Set());
   const [progressStage, setProgressStage] = useState<TryOnStage>("preparing");
   const [tryOnStartedAt, setTryOnStartedAt] = useState(0);
   const [averageDurationMs, setAverageDurationMs] = useState(38_000);
   const [recentResults, setRecentResults] = useState<TryOnResultRecord[]>([]);
   const [currentResult, setCurrentResult] = useState<TryOnResultRecord | null>(null);
   const [fitPreferences, setFitPreferences] = useState<FitPreferences>({ favoriteColors: [], fit: [], sizes: {} });
+  const [pendingCutout, setPendingCutout] = useState<PendingGarmentCutout | null>(null);
 
   useEffect(() => () => {
     if (photo) URL.revokeObjectURL(photo.url);
   }, [photo]);
   useEffect(() => { closetRef.current = closet; }, [closet]);
   useEffect(() => { garmentRef.current = garment; }, [garment]);
-  useEffect(() => () => closetRef.current.forEach((item) => URL.revokeObjectURL(item.url)), []);
+  useEffect(() => () => closetRef.current.forEach((item) => { URL.revokeObjectURL(item.url); if (item.originalUrl) URL.revokeObjectURL(item.originalUrl); }), []);
 
   useEffect(() => () => requestController.current?.abort(), []);
 
@@ -82,12 +86,16 @@ export default function Home() {
         const saved = JSON.parse(localStorage.getItem("closetai:demo:preferences:v1") || "null") as Partial<FitPreferences> | null;
         setFitPreferences({ favoriteColors: saved?.favoriteColors ?? ["navy"], fit: saved?.fit ?? ["relaxed"], sizes: saved?.sizes ?? { top: "M" } });
       } catch { setFitPreferences({ favoriteColors: ["navy"], fit: ["relaxed"], sizes: { top: "M" } }); }
+      setPersonalSessionReady(true);
       return;
     }
     let active = true;
-    void fetch("/api/preferences", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<Partial<FitPreferences>> : null).then((profile) => {
+    if (!sessionInitRef.current) {
+      sessionInitRef.current = fetch("/api/preferences", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<Partial<FitPreferences>> : null).catch(() => null);
+    }
+    void sessionInitRef.current.then((profile) => {
       if (active && profile) setFitPreferences({ favoriteColors: profile.favoriteColors ?? [], fit: profile.fit ?? [], sizes: profile.sizes ?? {} });
-    }).catch(() => { if (active) console.error(JSON.stringify({ event: "tryon_fit_preferences_unavailable" })); });
+    }).catch(() => { if (active) console.error(JSON.stringify({ event: "tryon_fit_preferences_unavailable" })); }).finally(() => { if (active) setPersonalSessionReady(true); });
     return () => { active = false; };
   }, []);
 
@@ -96,19 +104,20 @@ export default function Home() {
     setDemoOffline(offline);
     if (!offline) return;
     let active = true;
-    void Promise.all([fetch("/demo/person.png").then((response) => response.blob()), fetch("/demo/navy-jacket.png").then((response) => response.blob())]).then(([personBlob, garmentBlob]) => {
+    void Promise.all([fetch("/demo/person.png").then((response) => response.blob()), fetch("/demo/navy-jacket.png").then((response) => response.blob()), fetch("/demo/cutouts/navy-jacket.png").then((response) => response.blob())]).then(([personBlob, originalBlob, cleanBlob]) => {
       if (!active) return;
       const personFile = new File([personBlob], "Demo full-body photo.png", { type: "image/png" });
-      const garmentFile = new File([garmentBlob], "Navy Weekend Jacket.png", { type: "image/png" });
-      const item: ClosetGarment = { id: "demo-navy-jacket", name: garmentFile.name, file: garmentFile, url: URL.createObjectURL(garmentFile) };
+      const originalFile = new File([originalBlob], "Navy Weekend Jacket original.png", { type: "image/png" });
+      const garmentFile = new File([cleanBlob], "Navy Weekend Jacket cutout.png", { type: "image/png" });
+      const item: ClosetGarment = { id: "demo-navy-jacket", name: "Navy Weekend Jacket", file: garmentFile, url: URL.createObjectURL(garmentFile), originalFile, originalUrl: URL.createObjectURL(originalFile) };
       setPhoto({ file: personFile, name: personFile.name, url: URL.createObjectURL(personFile) });
-      setCloset([item]);
+      setDemoItems([item]);
       setGarment(item);
       garmentRef.current = item;
       setMessage("Offline demo wardrobe loaded from local files.");
     }).catch(() => { if (active) { console.error(JSON.stringify({ event: "demo_asset_load_failed" })); setMessage("Offline demo assets could not be loaded. Upload images to continue."); } });
     return () => { active = false; };
-  }, []);
+  }, [setDemoItems]);
 
   function cancelPendingRequest() {
     runEpochRef.current.invalidate();
@@ -126,16 +135,6 @@ export default function Home() {
     return true;
   }
 
-  function persistClosetItem(method: "POST" | "DELETE", value: ClosetGarment | string) {
-    if (document.documentElement.dataset.demoOffline === "true") return;
-    const body = method === "POST" && typeof value !== "string"
-      ? { item: { id: value.id, name: value.name } }
-      : { id: typeof value === "string" ? value : value.id };
-    void fetch("/api/closet", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-      .then((response) => { if (!response.ok) console.error(JSON.stringify({ event: method === "POST" ? "closet_item_save_failed" : "closet_item_delete_failed", status: response.status })); })
-      .catch(() => console.error(JSON.stringify({ event: method === "POST" ? "closet_item_save_failed" : "closet_item_delete_failed" })));
-  }
-
   function clearResult() {
     cancelPendingRequest();
     setMessage("");
@@ -146,16 +145,109 @@ export default function Home() {
     setShareActionId(null);
   }
 
-  function addGarment(file: File) {
+  async function beginGarmentCleanup(file: File, existingId: string | null = null, preserveOriginalUrl?: string) {
     if (!validateUpload(file)) return;
-    if (closet.length >= 12) { setMessage("Your session closet is full. Remove a piece before adding another."); setStatus("error"); return; }
+    if (!existingId && closetRef.current.length >= 100) { setMessage("Your closet is full. Remove a piece before adding another."); setStatus("error"); return; }
     clearResult();
-    const item: ClosetGarment = { id: crypto.randomUUID(), url: URL.createObjectURL(file), name: file.name, file };
-    setCloset((items) => [...items, item]);
-    persistClosetItem("POST", item);
-    setGarment(item);
+    const prior = pendingCutout;
+    const reviewId = crypto.randomUUID();
+    const originalUrl = preserveOriginalUrl ?? URL.createObjectURL(file);
+    if (prior?.originalUrl && prior.originalUrl !== originalUrl) URL.revokeObjectURL(prior.originalUrl);
+    if (prior?.cleanedUrl) URL.revokeObjectURL(prior.cleanedUrl);
+    setPendingCutout({ reviewId, original: file, originalUrl, cleaned: null, cleanedUrl: "", warnings: [], error: "", processing: true, existingId });
+
+    try {
+      let responseBlob: Blob;
+      let warnings: string[] = [];
+      if (document.documentElement.dataset.demoOffline === "true") {
+        if (existingId !== "demo-navy-jacket") throw new Error("This upload is not in the offline demo cache. Choose the cached Navy Weekend Jacket or connect to run cleanup.");
+        const response = await fetch("/demo/cutouts/navy-jacket.png");
+        if (!response.ok) throw new Error("The cached demo cutout could not be loaded.");
+        responseBlob = await response.blob();
+      } else {
+        const form = new FormData(); form.append("garment", file);
+        let response: Response | null = null;
+        try { response = await fetch("/api/tryon/preprocess", { method: "POST", body: form }); }
+        catch { /* A network failure can still use the clearly labeled white-background fallback. */ }
+        if (response?.ok) {
+          responseBlob = await response.blob();
+          warnings = (response.headers.get("X-Cutout-Warnings") || "").split(",").filter(Boolean);
+        } else if (response && response.status < 500) {
+          const body = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error || "Could not clean this garment. Retry or retake the photo.");
+        } else {
+          responseBlob = await approximateWhiteBackgroundCutout(file);
+          warnings = ["APPROXIMATE_WHITE_BACKGROUND"];
+        }
+      }
+      const cleaned = new File([responseBlob], `${file.name.replace(/\.[^.]+$/, "")}-cutout.png`, { type: "image/png" });
+      const cleanedUrl = URL.createObjectURL(cleaned);
+      setPendingCutout((current) => {
+        if (current?.reviewId !== reviewId) { URL.revokeObjectURL(cleanedUrl); return current; }
+        return { ...current, cleaned, cleanedUrl, warnings, processing: false };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not prepare the garment cutout. Retake the photo and try again.";
+      setPendingCutout((current) => current?.reviewId === reviewId ? { ...current, error: message, processing: false } : current);
+    }
+  }
+
+  function addGarment(file: File) {
+    if (!personalSessionReady && document.documentElement.dataset.demoOffline !== "true") {
+      setMessage("Your closet is still loading. Please try again in a moment.");
+      setStatus("error");
+      return;
+    }
+    void beginGarmentCleanup(file);
+  }
+
+  function discardPendingCutout() {
+    if (pendingCutout?.originalUrl) URL.revokeObjectURL(pendingCutout.originalUrl);
+    if (pendingCutout?.cleanedUrl) URL.revokeObjectURL(pendingCutout.cleanedUrl);
+    setPendingCutout(null);
+  }
+
+  function retryPendingCutout() {
+    if (pendingCutout) void beginGarmentCleanup(pendingCutout.original, pendingCutout.existingId, pendingCutout.originalUrl);
+  }
+
+  function retakePendingCutout(file: File) {
+    if (pendingCutout) void beginGarmentCleanup(file, pendingCutout.existingId);
+  }
+
+  async function acceptGarmentCutout(cleanFile: File) {
+    const pending = pendingCutout;
+    if (!pending) return;
+    const old = pending.existingId ? closetRef.current.find((item) => item.id === pending.existingId) : null;
+    const item: ClosetGarment = {
+      id: pending.existingId ?? crypto.randomUUID(),
+      name: old?.name ?? pending.original.name.replace(/\.[^.]+$/, ""),
+      file: cleanFile,
+      url: URL.createObjectURL(cleanFile),
+      originalFile: pending.original,
+      originalUrl: pending.originalUrl,
+    };
+    const priorSelection = garmentRef.current;
     garmentRef.current = item;
+    setGarment(item);
     if (activeTab === "tryon") setGuidedStep(2);
+    if (pending.cleanedUrl) URL.revokeObjectURL(pending.cleanedUrl);
+    setPendingCutout(null);
+    const saved = await addClosetItem(item);
+    if (!saved) {
+      URL.revokeObjectURL(item.url);
+      if (item.originalUrl && item.originalUrl !== old?.originalUrl) URL.revokeObjectURL(item.originalUrl);
+      if (garmentRef.current?.id === item.id) {
+        garmentRef.current = old ?? priorSelection;
+        setGarment(old ?? priorSelection);
+      }
+      return;
+    }
+    if (old) {
+      URL.revokeObjectURL(old.url);
+      if (old.originalUrl && old.originalUrl !== pending.originalUrl) URL.revokeObjectURL(old.originalUrl);
+    }
+    setMessage("Clean transparent cutout saved to your closet.");
   }
 
   function selectGarment(id: string) {
@@ -166,14 +258,19 @@ export default function Home() {
     if (activeTab === "tryon") setGuidedStep(2);
   }
 
-  function removeClosetGarment(id: string) {
+  async function removeClosetGarment(id: string) {
     clearResult();
     const removed = closet.find((item) => item.id === id);
-    if (removed) URL.revokeObjectURL(removed.url);
-    setCloset((items) => items.filter((item) => item.id !== id));
-    persistClosetItem("DELETE", id);
-    setPreparedGarmentIds((ids) => { const next = new Set(ids); next.delete(id); return next; });
-    if (garment?.id === id) { garmentRef.current = null; setGarment(null); }
+    const wasSelected = garmentRef.current?.id === id;
+    if (wasSelected) { garmentRef.current = null; setGarment(null); }
+    const deleted = await removeClosetItem(id);
+    if (deleted && removed) {
+      URL.revokeObjectURL(removed.url);
+      if (removed.originalUrl) URL.revokeObjectURL(removed.originalUrl);
+    } else if (!deleted && wasSelected && !garmentRef.current && removed) {
+      garmentRef.current = removed;
+      setGarment(removed);
+    }
   }
 
   function setUpload(kind: UploadKind, event: ChangeEvent<HTMLInputElement>) {
@@ -193,21 +290,6 @@ export default function Home() {
     else { garmentRef.current = null; setGarment(null); }
   }
 
-  function acceptGarmentBackground(processed: File | null) {
-    if (!garmentRef.current) return;
-    let accepted = garmentRef.current;
-    if (processed) {
-      const nextUrl = URL.createObjectURL(processed);
-      URL.revokeObjectURL(accepted.url);
-      accepted = { ...accepted, file: processed, url: nextUrl };
-      setCloset((items) => items.map((item) => item.id === accepted.id ? accepted : item));
-      persistClosetItem("POST", accepted);
-      setGarment(accepted);
-      garmentRef.current = accepted;
-    }
-    setPreparedGarmentIds((ids) => new Set(ids).add(accepted.id));
-  }
-
   function buildWhyFits(garmentName: string) {
     const name = garmentName.toLowerCase();
     const palette = ["navy", "black", "white", "blue", "green", "red", "cream", "beige", "brown", "grey", "gray", "pink"].find((color) => name.includes(color));
@@ -217,7 +299,7 @@ export default function Home() {
     return reasons.length ? `${reasons[0]}${reasons.length > 1 ? ` and ${reasons[1]}` : ""}.` : `You chose ${garmentName} from your closet, so this look builds on a piece you already own.`;
   }
 
-  const ready = Boolean(photo && garment && preparedGarmentIds.has(garment.id));
+  const ready = Boolean(photo && garment);
 
   function startVoiceTryOn(garmentId?: string, turnSignal?: AbortSignal) {
     if (turnSignal?.aborted) return;
@@ -436,23 +518,25 @@ export default function Home() {
       <div className="app-main">
         {activeTab === "closet" && <section className="app-screen" aria-labelledby="closet-title">
           <div className="screen-heading"><span className="screen-eyebrow">YOUR WARDROBE</span><h1 id="closet-title">Closet</h1><p>Keep your favorite pieces close. Pick one when you’re ready to try it on.</p></div>
-          {closet.length === 0 ? <div className="screen-empty closet-empty">
+          {closetLoading && closet.length === 0 ? <ClosetLoadingSkeleton /> : closet.length === 0 ? <div className="screen-empty closet-empty">
             <span className="empty-illustration" aria-hidden="true">♧</span><h2>Your closet is empty</h2><p>Add a clear photo of a clothing item to start building your digital wardrobe.</p>
           </div> : <div className="closet-grid" aria-label="Your closet pieces">
             {closet.map((item) => <article className={`closet-card ${garment?.id === item.id ? "is-selected" : ""}`} key={item.id}>
               <button type="button" className="closet-card-select" aria-pressed={garment?.id === item.id} onClick={() => selectGarment(item.id)}>
-                <img src={item.url} alt={item.name} /><span className="closet-card-name">{item.name}</span><small>{garment?.id === item.id ? "Selected for try-on" : "Select for try-on"}</small>
+                <span className="closet-card-cutout"><img src={item.url} alt={item.name} /></span><span className="closet-card-name">{item.name}</span><small>{garment?.id === item.id ? "Selected for try-on" : "Select for try-on"}</small>
               </button>
-              <button type="button" className="closet-card-remove" onClick={() => removeClosetGarment(item.id)} aria-label={`Remove ${item.name} from closet`}>Remove</button>
+              <div className="closet-card-actions">{item.originalFile && <button type="button" className="closet-card-clean" onClick={() => void beginGarmentCleanup(item.originalFile!, item.id, item.originalUrl)} aria-label={`Re-run cleanup for ${item.name}`}>Re-clean</button>}<button type="button" className="closet-card-remove" onClick={() => void removeClosetGarment(item.id)} aria-label={`Remove ${item.name} from closet`}>Remove</button></div>
             </article>)}
           </div>}
-          <label className={`primary-cta closet-add-cta ${closet.length >= 12 ? "is-disabled" : ""}`} htmlFor="closet-piece-upload"><UploadIcon /><span>{closet.length ? "Add another piece" : "Add your first piece"}</span></label>
-          <input id="closet-piece-upload" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" disabled={closet.length >= 12} onChange={(event) => setUpload("garment", event)} aria-label="Upload a closet garment" />
-          {closet.length > 0 && <p className="screen-hint">{closet.length} of 12 pieces · Tap a piece to select it for try-on.</p>}
+          <label className={`primary-cta closet-add-cta ${closet.length >= 100 ? "is-disabled" : ""}`} htmlFor="closet-piece-upload"><UploadIcon /><span>{closet.length ? "Add another piece" : "Add your first piece"}</span></label>
+          <input id="closet-piece-upload" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" disabled={closetLoading || closet.length >= 100} onChange={(event) => setUpload("garment", event)} aria-label="Upload a closet garment" />
+          {closetError && <p className="screen-error" role="alert">{closetError}</p>}
+          {closet.length > 0 && <p className="screen-hint">{closet.length} of 100 pieces · Tap a piece to select it for try-on.</p>}
         </section>}
 
         {activeTab === "tryon" && <section className="app-screen" aria-labelledby="tryon-title">
           <div className="screen-heading"><span className="screen-eyebrow">VIRTUAL FITTING ROOM</span><h1 id="tryon-title">Try-on</h1><p>See one of your closet pieces on you.</p></div>
+          {closetError && <p className="screen-error" role="alert">{closetError}</p>}
           <div className="tryon-modes app-mode-switch" role="group" aria-label="Try-on mode">
             <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => setMode("photo")}>Photo</button>
             <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => setMode("live")}>Live camera</button>
@@ -468,7 +552,7 @@ export default function Home() {
             onShare={() => navigate("share")}
             onResultError={() => { setMessage("The saved image could not be loaded. Try another result or render again."); setStatus("error"); }}
           /> : mode === "live" ? <div className="tryon-live-screen">
-            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={false} demoOffline={demoOffline} />
+            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={false} demoOffline={demoOffline} closetLoading={closetLoading} />
             {status === "error" && <p className="live-job-message error-message" role="alert">{message}</p>}
             {status === "result" && <p className="live-job-message" role="status">Quick CV overlay preview · the high-quality render is saved in Photo.</p>}
           </div> : <div className="tryon-guided-flow">
@@ -477,10 +561,16 @@ export default function Home() {
               <PersonPhotoStep photo={photo} demoOffline={demoOffline} onPhoto={(file) => { if (!validateUpload(file)) return; clearResult(); setPhoto({ url: URL.createObjectURL(file), name: file.name, file }); }} onRemove={() => removeUpload("photo")} onContinue={() => setGuidedStep(2)} />
               {status === "error" && <p className="screen-error guided-flow-error" role="alert">{message}</p>}
             </> : <>
-              <GarmentBackgroundReview garments={closet} selectedId={garment?.id ?? null} isPrepared={Boolean(garment && preparedGarmentIds.has(garment.id))} demoOffline={demoOffline} onSelect={selectGarment} onUpload={addGarment} onAccept={acceptGarmentBackground} />
+              <div className="garment-picker-step">
+                <div className="guided-step-heading"><span className="guided-step-number">2</span><div><h2>Choose a garment</h2><p>Choose a saved transparent cutout or upload a garment photo for cleanup.</p></div></div>
+                {closetLoading && closet.length === 0 ? <ClosetLoadingSkeleton compact /> : closet.length ? <div className="garment-choice-list" aria-label="Choose a garment from your closet">{closet.map((item) => <button key={item.id} type="button" className={`garment-choice ${item.id === garment?.id ? "is-selected" : ""}`} aria-pressed={item.id === garment?.id} onClick={() => selectGarment(item.id)}><img src={item.url} alt="" /><span>{item.name}</span></button>)}</div> : <p className="empty-garment-note">Your closet is empty. Upload one clothing photo and review its cutout first.</p>}
+                <label className="garment-upload-choice" htmlFor="tryon-garment-upload"><span aria-hidden="true">＋</span>Upload garment</label>
+                <input id="tryon-garment-upload" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" disabled={closetLoading} onChange={(event) => setUpload("garment", event)} />
+                {garment && <div className="selected-cutout-preview"><span className="screen-eyebrow">SELECTED CUTOUT</span><div className="cutout-checkerboard"><img src={garment.url} alt={`${garment.name} with transparent background`} /></div><p>{garment.name} · transparent PNG used for live preview and try-on</p></div>}
+              </div>
               {status === "error" && <p className="screen-error guided-flow-error" role="alert">{message}</p>}
-              <div className="guided-flow-footer"><button type="button" className="secondary-cta" onClick={() => setGuidedStep(1)}>Back to photo</button><button type="button" className="primary-cta" disabled={!photo || !garment || !preparedGarmentIds.has(garment.id)} onClick={() => { if (photo && garment) void generateLook(photo.file, garment.file, garment.id); }}>{closet.length && garment ? "Generate high-quality look" : "Choose a garment first"}</button></div>
-              {ready && <p className="screen-hint guided-ready-note">Ready to render {garment?.name}. The server reuses the existing cached try-on flow.</p>}
+              <div className="guided-flow-footer"><button type="button" className="secondary-cta" onClick={() => setGuidedStep(1)}>Back to photo</button><button type="button" className="primary-cta" disabled={!photo || !garment} onClick={() => { if (photo && garment) void generateLook(photo.file, garment.file, garment.id); }}>{closet.length && garment ? "Generate high-quality look" : "Choose a garment first"}</button></div>
+              {ready && <p className="screen-hint guided-ready-note">Ready to render {garment?.name}. The cleaned transparent PNG is sent to the existing cached try-on flow.</p>}
             </>}
           </div>}
         </section>}
@@ -502,6 +592,8 @@ export default function Home() {
 
         <VoiceAgent garments={closet} personPhoto={photo?.file ?? null} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} onNavigateToShop={() => setActiveTab("shop")} onNavigateToTryOn={() => navigate("tryon")} demoOffline={demoOffline} activeTab={activeTab} onPreferencesChange={setFitPreferences} />
       </div>
+
+      {pendingCutout && <GarmentCutoutReview pending={pendingCutout} onRetake={retakePendingCutout} onRetry={retryPendingCutout} onAccept={acceptGarmentCutout} onClose={discardPendingCutout} />}
 
       <nav className="bottom-nav" aria-label="Main navigation">
         {([ ["closet", "Closet"], ["tryon", "Try-on"], ["shop", "Shop"], ["share", "Share"] ] as const).map(([tab, label]) => <button type="button" key={tab} aria-current={activeTab === tab ? "page" : undefined} onClick={() => navigate(tab)}><TabIcon tab={tab} /><span>{label}</span></button>)}

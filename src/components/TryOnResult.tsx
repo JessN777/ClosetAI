@@ -67,7 +67,7 @@ export default function TryOnResult({ result, history, defaultSize, canTryDiffer
       <button type="button" className="result-action result-action-share" onClick={onShare}><span aria-hidden="true">↗</span>Share</button>
     </div>
     {sizeMenuOpen && <div className="result-size-picker"><label htmlFor="tryon-size-select">Size to render</label><select id="tryon-size-select" value={size} onChange={(event) => setSize(event.currentTarget.value)}>{sizes.map((item) => <option key={item} value={item}>{item}</option>)}</select><button type="button" className="secondary-cta" onClick={() => onTryDifferentSize(size)}>Render size {size}</button><small>Size is sent as a fit hint to the try-on model; the result is an estimate.</small></div>}
-    <p className="result-caption">{result.cached ? "Showing a saved look for this garment." : "Your high-quality render is ready."}</p>
+    <p className="result-caption">{result.cached ? "High-quality render · showing a saved look for this garment." : "High-quality render. This is the diffusion result, separate from the live preview."}</p>
     {history.length > 0 && <div className="tryon-result-history-wrap"><h3>Recent looks <span>Compare your last {history.length} of 3</span></h3><div className="tryon-result-history" aria-label="Recent try-on results">{history.map((item) => <button type="button" key={item.id} className={`tryon-history-card ${item.id === result.id ? "is-current" : ""}`} aria-pressed={item.id === result.id} onClick={() => onSelectHistory(item)}><img src={item.url} alt="" /><span>{item.garmentName}</span>{item.size && <small>Size {item.size}</small>}</button>)}</div></div>}
   </section>;
 }

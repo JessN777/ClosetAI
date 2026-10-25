@@ -10,19 +10,28 @@ Copy `.env.example` to `.env.local` and set:
 
 - `REPLICATE_API_TOKEN` from your Replicate account.
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` from an Upstash Redis database.
+- `DAILY_TRYON_LIMIT` sets the shared daily prediction spend cap (defaults to `200`). `DISABLE_SPEND_GUARD=1` bypasses it only outside production for local development; production always enforces the cap.
+- `DAILY_LLM_LIMIT` sets the shared daily Claude model-call cap (defaults to `200`). It uses an atomic UTC-day Redis counter and returns 429 with `Retry-After` until midnight UTC when reached.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for server-side Storage uploads.
+- Closet cutouts are stored in the private `closet-items` bucket (created as private when missing). Metadata and storage paths are stored in Upstash Redis under a hash of the signed anonymous user ID. The server returns short-lived signed URLs; the service-role key never reaches the browser. `CLOSET_GARMENTS_BUCKET` is retained only as the legacy bucket name for reading and deleting older records.
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` also store share-page records.
 - `OPENAI_API_KEY` is optional and generates social captions; without it, write a caption manually.
 - `SERPAPI_API_KEY` is optional and enables live Google Shopping product listings for **Shop the look**. Without it, the flow still shows cited pieces and closet matches, with a clear product-search-unavailable message.
 - `NEXT_PUBLIC_SITE_URL` is optional and should be the public app origin in production, for example `https://closet.example`.
 
-Keep credentials server-side. Do not prefix them with `NEXT_PUBLIC_` or expose their values to the browser. Create a public Supabase Storage bucket named `tryon-results`; files in it are readable by anyone with the URL. Generated PNGs are stored as `<input-sha256>.png`, and their public URLs are saved in Redis.
+Keep credentials server-side. Do not prefix them with `NEXT_PUBLIC_` or expose their values to the browser. Create a public Supabase Storage bucket named `tryon-results`; files in it are readable by anyone with the URL. Generated PNGs are stored as `<input-sha256>.png`, and their public URLs are saved in Redis. Closet records in `closet-items` include the transparent cutout path, optional original-photo path, and creation time. Each GET returns a fresh, short-lived signed `imageUrl`. Older metadata records remain readable because image metadata fields are optional.
 
 ## Job lifecycle
 
 `POST /api/tryon` validates both files, preprocesses them, then checks the successful-result cache. An atomic Redis reservation keyed by the normalized image hash makes concurrent submissions for the same images share one active job. The job record is saved before the Replicate prediction starts, so a second request can safely receive that job ID while startup is in progress. The endpoint returns `{ "jobId": "..." }` with HTTP 202.
 
 The browser polls `GET /api/tryon/:id` every two seconds for up to 90 seconds. A short Redis poll lock prevents simultaneous status requests from downloading and uploading the same result, and job updates cannot overwrite a newer or terminal status. On success, the Replicate output is saved to Supabase Storage and the permanent public URL is stored in the job and cached by SHA-256 of the normalized person PNG, processed garment PNG, and model version. Jobs expire after 24 hours. Model failures are not cached; storage failures are returned with `retryable: true` so the user can submit again.
+
+## Garment cutouts
+
+`POST /api/tryon/preprocess` runs **BiRefNet general** on the server through Replicate and requests the model's raw `mask` output. The pinned version is `21f2c4a9159af128ab9b9126401eebe7f8c5310841ed628b74a4c462df00da67` in `tryon.config.json`; its current input schema is linked from [the pinned Replicate version](https://replicate.com/sprited/birefnet/versions/21f2c4a9159af128ab9b9126401eebe7f8c5310841ed628b74a4c462df00da67/api). The server keeps the largest connected region, fills small enclosed holes, erodes one pixel, feathers the edge, and crops to the mask bounds with padding. Coverage below 10% or above 90%, a mask touching the image edge, and source images below 512 pixels on the short side return specific errors. A second large component is removed from the cutout and flagged for review so the user can erase or retake.
+
+Every new closet upload uses the same server BiRefNet mask and cleanup route before it can be saved. If that server call is unreachable or returns a server error, the browser offers a border-connected white-background flood fill as an **Approximate fallback**; it still applies the mask coverage and edge checks, and the review labels it for careful inspection. Validation failures such as a cropped garment keep their specific rejection message. Uploads open a before-and-after checkerboard review; the user can erase leftover edges or retake the photo, and the original is never offered as a try-on fallback. Accepting stores the original and transparent PNG in the private closet bucket. The **Re-clean** action explicitly runs the saved original through segmentation again. Live WebGL loads only the clean PNG, premultiplies texture alpha, and discards near-transparent fragments. `/api/tryon` skips segmentation for an already-transparent PNG and composites it over light gray for the diffusion model. Demo garments have checked-in transparent cutouts under `public/demo/cutouts/`.
 
 ## API
 
@@ -33,16 +42,20 @@ Additional styling routes:
 - POST /api/looks/match accepts a look name and matches its stored profile to the signed user's closet.
 - POST /api/looks/products accepts profile gaps and returns retailer listing options from the server-side shopping provider; when a listing is unavailable, the piece stays visible without a price.
 - GET /api/looks/product-image proxies only HTTPS retailer listing images from an allowlist so a selected product image can enter the existing try-on upload flow.
-- GET, POST, and DELETE /api/closet read, save, or remove the signed user's closet metadata. Image files stay in the current browser session; Claude receives garment names and optional attributes only.
+- GET, POST, and DELETE /api/closet read, save, or remove the signed user's closet entries. POST accepts one transparent PNG cutout under 8 MB and an optional original photo; it validates that the PNG has both transparent and visible pixels. The API caps closets at 100 items, and deletion removes the Redis record plus its stored image (restoring the image if metadata deletion fails). GET returns real metadata with fresh short-lived signed Storage URLs. Claude receives garment names and optional attributes only.
 
 - `POST /api/tryon` accepts multipart form data with `photo` and `garment` image fields, then returns `{ "jobId": "..." }` with HTTP 202 after the job is reserved and saved.
 - `GET /api/tryon/:id` returns `{ "status": "queued" | "processing" | "succeeded" | "failed" }`, with `resultUrl` on success or `error` on failure.
 
 If Replicate output download or Supabase upload fails after a prediction succeeds, the job is marked `failed` with `retryable: true`.
 
-Uploads must be JPEG, PNG, or WebP, smaller than 8 MB, and 256–4096 pixels on each side. The POST endpoint allows 5 validated try-on submissions per IP in a rolling hour; rate-limited requests receive HTTP 429 with `Retry-After`. Replicate network failures and 5xx responses are retried up to three total attempts with exponential backoff. Validation, 4xx, and model failures are not retried.
+Uploads must be JPEG, PNG, or WebP and smaller than 8 MB. Try-on person photos must be 256–4096 pixels on each side; garment photos must be at least 512 pixels on the short side and no larger than 4096 pixels on either side. Before a new Replicate prediction, the POST endpoint checks the UTC-day Redis counter `closetai:spend:YYYY-MM-DD`. Once it reaches `DAILY_TRYON_LIMIT` (default `200`), new predictions receive HTTP 429 with a `Retry-After` value for the seconds remaining until midnight UTC. Only newly created predictions increment the counter; cache hits, validation failures, and requests that join an existing job do not. The counter expires after two days. This is a shared cost cap, not a per-user limit. `DISABLE_SPEND_GUARD=1` bypasses the check only in non-production environments and is ignored in production. Replicate network failures and 5xx responses are retried up to three total attempts with exponential backoff. Validation, 4xx, and model failures are not retried.
 
 Run locally with `npm run dev`.
+
+### Seed a demo closet
+
+Start the app, then set `CLOSETAI_SEED_COOKIE` to the full `closetai_user=...` cookie header for the signed anonymous demo user and optionally set `CLOSETAI_SEED_BASE_URL`. Run `npm run seed:closet` to upload the four checked-in cutouts from `public/demo/cutouts/`. The script does not print or persist the cookie. This seeds persistent storage; `DEMO_OFFLINE=1` continues to use the bundled local demo garment without network access.
 
 ## Offline demo
 
@@ -56,7 +69,7 @@ After a try-on succeeds, choose **Share this look** to preview a center-cropped 
 
 The server-only decision layer is in src/lib/claude/. It exports recommendOutfit, buildLookProfile, and matchProfileToCloset, and validates every model result with Zod. Claude web search is required for style profiles, which need at least two source URLs and disclose thin or conflicting evidence. The decision layer receives text and closet metadata only; photos and facial features are not used.
 
-The Shop tab's Outfit ideas panel calls POST /api/outfits/recommend and shows loading, error, and Cached states. The Dress like panel calls POST /api/looks/profile and POST /api/looks/match. Recommendations are cached for ten minutes, closet matches for one hour, and profiles for 30 days. Claude routes allow 20 model calls per user per hour and return 429 with Retry-After when limited. A route logs one structured JSON line with route, cache status, model, token counts, duration, and error code; prompts and personal data are excluded.
+The Shop tab's Outfit ideas panel calls POST /api/outfits/recommend and shows loading, error, and Cached states. The Dress like panel calls POST /api/looks/profile and POST /api/looks/match. Recommendations are cached for ten minutes, closet matches for one hour, and profiles for 30 days. Claude routes share a UTC daily counter at `closetai:llm-spend:YYYY-MM-DD`; `DAILY_LLM_LIMIT` sets the cap (default `200`). The counter increments atomically immediately before an uncached model call and expires after two days. Once the cap is reached, routes return 429 with `Retry-After` seconds until midnight UTC. Validation failures and cache hits do not consume the cap. A route logs one structured JSON line with route, cache status, model, token counts, duration, and error code; prompts and personal data are excluded.
 
 With DEMO_OFFLINE=1, the Claude functions load scripted JSON responses from public/demo/llm using a SHA-256 hash of the canonical function input. Regenerate the checked-in fixtures with npx tsx scripts/generate-claude-demo-cache.ts.
 
@@ -102,14 +115,16 @@ With `DEMO_OFFLINE=1`, **Confirm test payment** creates a local mock attempt lab
 
 ## Live try-on
 
-Choose **Live try-on**, add a garment to the session closet, select it, and click **Start camera**. Garments uploaded in photo mode also appear in the closet. Camera access requires HTTPS or localhost and an explicit browser permission; the page explains denied permission, a missing or busy camera, model-loading failures, and no person in view. Stopping the camera, switching to photo mode, leaving the page, or opening the finished render stops the video tracks and worker.
+Choose **Live camera**, select a saved transparent cutout, and click **Start camera**. Garment uploads in the Closet or Try-on tabs go through the same server cleanup and before-and-after review before they can be saved. Camera access requires HTTPS or localhost and an explicit browser permission; the page explains denied permission, a missing or busy camera, model-loading failures, and no person in view. Stopping the camera, switching to photo mode, leaving the page, or opening the finished render stops the video tracks and worker.
 
 MediaPipe Pose Landmarker Lite tracks shoulders, hips, and elbows in a Web Worker, with GPU acceleration and a CPU fallback. A time-based smoothing filter reduces jitter. A triangle mesh fits the garment to shoulder width, torso angle, hips, and sleeve direction. Rendering targets 30 FPS independently of inference, with only one detection frame in flight and live preview/tracking FPS displayed. Actual speed depends on the device; the UI flags tracking below 15 FPS. The first start downloads the pinned MediaPipe 1.1.1 WASM runtime from jsDelivr and the Lite model from Google Cloud Storage. Webcam frames are processed locally.
 
-Use a front-facing top, ideally a tightly cropped transparent PNG. The optional light-background cleanup is a quick border-connected white removal; turn it off for white clothing. Width and length controls affect only this approximate 2D preview, which does not simulate fabric or arm occlusion. **Take high-quality look** captures a clean, unmirrored JPEG from the video (without the overlay), pairs it with the selected original garment, and uses the existing `/api/tryon` job and polling flow. Only this explicit capture is uploaded. Closet items live in browser memory for the current session.
+The live preview loads only the accepted alpha cutout; it does not remove backgrounds in the browser. The WebGL texture uses premultiplied alpha and the shader discards near-transparent pixels, so the source rectangle is never drawn over the camera. Width and length controls affect only this approximate preview. **Take high-quality look** captures a clean, unmirrored JPEG from the video (without the overlay), pairs it with the selected clean garment PNG, and uses the existing `/api/tryon` job and polling flow. The server composites transparent garment pixels onto a neutral light-gray backdrop for the diffusion model. Closet images persist in the private Supabase bucket; only an explicit Re-clean action sends the saved original through segmentation again.
 
 ## Checks
 
-- `npm test` checks pose confidence, smoothing, warp geometry, background cleanup, and capture dimensions.
+- `npm test` checks pose confidence, smoothing, warp geometry, garment mask components, hole filling, edge cleanup, crop, alpha preservation, and capture dimensions.
+- `npm run eval:garment-fixtures` processes six generated garment photos (hanger, busy flat lay, mannequin, hands, edge cutoff, and pattern) with the pinned BiRefNet model. It writes masks, cutouts, a contact sheet, and a JSON report under `tests/garment-eval/`; set `REPLICATE_API_TOKEN` first.
+- `npx tsx scripts/evaluate-garments.ts` evaluates ten user-provided licensed photos with the pinned BiRefNet version and writes masks, cutouts, person overlays, a before/after contact sheet, and an automated report to `tests/garment-eval/results/`. The workspace does not contain private garment photos or a Replicate token, so a live pass-rate run remains pending; see [`GARMENT_NOTES.md`](./GARMENT_NOTES.md).
 - `npm run test:e2e` uses installed Chrome, a synthetic webcam stream, and the real MediaPipe model. It checks permission errors, pose loss, frame rate, clean frame submission, job polling, and camera cleanup. It downloads Google's public pose test image on first run and mocks `/api/tryon`, so no Replicate predictions are billed.
 - `npm run lint` and `npx tsc --noEmit` check the source; `npm run build` produces the production app.

@@ -1,0 +1,10 @@
+{
+  "cases": [
+    { "id": "navy-hanger", "file": "navy-hanger.png", "category": "hanger on white wall" },
+    { "id": "denim-busy-flatlay", "file": "denim-busy-flatlay.png", "category": "flat lay on patterned background" },
+    { "id": "mannequin-cream-sweater", "file": "mannequin-cream-sweater.png", "category": "mannequin in room" },
+    { "id": "hands-busy-floral-blouse", "file": "hands-busy-floral-blouse.png", "category": "hands and busy room" },
+    { "id": "cutoff-olive-coat", "file": "cutoff-olive-coat.png", "category": "garment cut off at image edge" },
+    { "id": "houndstooth-closet", "file": "houndstooth-closet.png", "category": "patterned garment in crowded closet" }
+  ]
+}

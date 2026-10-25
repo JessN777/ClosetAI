@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { buildLookProfileInputSchema, getClaudeUsage, lookProfileSchema } from "@/lib/claude";
 import { getClaudeRouteServices, normalizeLookName } from "@/lib/claude/route-runtime";
-import { apiFailure, enforceClaudeRateLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
+import { apiFailure, enforceClaudeDailyLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
 import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@/lib/personal-session";
 import { z } from "zod";
 
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
         return attachCookie(NextResponse.json({ profile: cachedProfile.data, cached: true, storedAt: existing.storedAt }));
       }
     }
-    const limited = await enforceClaudeRateLimit(redis, session.id, log);
+    const limited = await enforceClaudeDailyLimit(redis, log);
     if (limited) return attachCookie(limited);
     const profile = await services.buildProfile(input);
     setRouteUsage(log, getClaudeUsage(profile));

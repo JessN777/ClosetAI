@@ -5,19 +5,20 @@ import type { Metadata } from "sharp";
 import { getCachedGarmentResult, getCachedTryOnResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, reserveTryOnJob, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
 import { hasTryOnStorageConfig } from "@/lib/tryon-storage";
 import { isRetryableReplicateError, withReplicateRetry } from "@/lib/replicate-retry";
-import { createPredictionWithDailySpendGuard, DailyTryOnLimitError } from "@/lib/tryon-spend-guard";
+import { tryOnSettings } from "@/lib/tryon-config";
+import { GarmentPhotoError, padPerson, prepareGarmentBackdrop } from "@/lib/tryon-preprocess";
+import { GarmentSegmentationError } from "@/lib/garment-segmentation";
+import { buildDiffusionInputs } from "@/lib/tryon-pipeline";
+import { createTryOnPredictionForNewInput, DailyTryOnLimitError } from "@/lib/tryon-spend-guard";
+import { demoTryOnForGarment } from "@/lib/demo-tryon";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-const MODEL_VERSION =
-  "0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985";
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_GARMENT_DESCRIPTION_LENGTH = 200;
 const MIN_IMAGE_SIDE = 256;
 const MAX_IMAGE_SIDE = 4096;
-const DATA_URL_BYTE_LIMIT = 256 * 1024;
 const MIME_FORMATS = {
   "image/jpeg": "jpeg",
   "image/png": "png",
@@ -71,6 +72,9 @@ async function validateImage(form: FormData, field: "photo" | "garment") {
     if (!metadata.width || !metadata.height) {
       return errorResponse(`${label} image dimensions could not be read.`, 400);
     }
+    if (field === "garment" && Math.min(metadata.width, metadata.height) < 512) {
+      return errorResponse("This garment photo is too small for a high-quality render. Upload a photo that is at least 512 pixels on its short side.", 400);
+    }
     if (metadata.width < MIN_IMAGE_SIDE || metadata.height < MIN_IMAGE_SIDE) {
       return errorResponse(`${label} must be at least 256 pixels wide and 256 pixels high.`, 400);
     }
@@ -88,48 +92,7 @@ async function validateImage(form: FormData, field: "photo" | "garment") {
   return value;
 }
 
-async function preparePersonPhoto(file: File) {
-  const source = Buffer.from(await file.arrayBuffer());
-  const sharp = (await import("sharp")).default;
-  return sharp(source)
-    .rotate()
-    .resize(768, 1024, {
-      fit: "contain",
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    })
-    .png()
-    .toBuffer();
-}
-
-async function prepareGarmentImage(file: File) {
-  const { removeBackground } = await import("@imgly/background-removal-node");
-  const sharp = (await import("sharp")).default;
-  const source = new Blob([new Uint8Array(await file.arrayBuffer())], { type: file.type });
-  const transparentCutout = await removeBackground(source, {
-    model: "small",
-    output: { format: "image/png", quality: 1 },
-  });
-  const cutoutBytes = Buffer.from(await transparentCutout.arrayBuffer());
-
-  // Flatten onto white so the model receives an ordinary opaque PNG.
-  return sharp(cutoutBytes).flatten({ background: "#ffffff" }).png().toBuffer();
-}
-
-async function toModelImage(replicate: Replicate, bytes: Buffer, filename: string) {
-  if (bytes.byteLength <= DATA_URL_BYTE_LIMIT) {
-    return `data:image/png;base64,${bytes.toString("base64")}`;
-  }
-
-  const processedFile = new File([new Uint8Array(bytes)], filename, { type: "image/png" });
-  const uploaded = await replicate.files.create(processedFile);
-  const url = uploaded.urls?.get;
-  if (!url) {
-    throw new Error("Replicate did not return a URL for the uploaded image.");
-  }
-  return url;
-}
-
-function tryOnInputHash(personPng: Buffer, garmentPng: Buffer, garmentDes: string) {
+function tryOnInputHash(personPng: Buffer, garmentPng: Buffer, garmentDes: string, modelVersion: string) {
   const hash = createHash("sha256");
   const addBytes = (bytes: Buffer) => {
     const length = Buffer.alloc(8);
@@ -137,7 +100,7 @@ function tryOnInputHash(personPng: Buffer, garmentPng: Buffer, garmentDes: strin
     hash.update(length).update(bytes);
   };
 
-  hash.update(MODEL_VERSION, "utf8").update(Buffer.from([0]));
+  hash.update(modelVersion, "utf8").update(Buffer.from([0]));
   addBytes(personPng);
   addBytes(garmentPng);
   // Preserve existing default cache keys; include fit hints so size comparisons do not reuse another size's result.
@@ -190,7 +153,8 @@ export async function POST(request: Request) {
   if (garmentIds.length > 1 || (garmentIds[0] !== undefined && typeof garmentIds[0] !== "string")) return errorResponse("Garment selection ID must be a single text value.", 400);
 
   if (process.env.DEMO_OFFLINE === "1") {
-    return NextResponse.json({ jobId: "00000000-0000-4000-8000-000000000001", status: "succeeded", resultUrl: "/demo/tryon-result.png", cached: true });
+    const cached = demoTryOnForGarment(garment.name);
+    return NextResponse.json({ jobId: cached.jobId, status: "succeeded", resultUrl: cached.resultUrl, cached: true });
   }
 
   const token = process.env.REPLICATE_API_TOKEN;
@@ -205,14 +169,16 @@ export async function POST(request: Request) {
 
   let predictionId: string | undefined;
   let activeJob: TryOnJob | undefined;
+  const replicate = token ? new Replicate({ auth: token }) : undefined;
 
   try {
+    const settings = tryOnSettings();
     const [personPng, garmentPng] = await Promise.all([
-      preparePersonPhoto(photo),
-      prepareGarmentImage(garment),
+      padPerson(Buffer.from(await photo.arrayBuffer()), settings.model.personWidth, settings.model.personHeight),
+      prepareGarmentBackdrop(Buffer.from(await garment.arrayBuffer()), garment.type || "image/png", replicate),
     ]);
 
-    const inputHash = tryOnInputHash(personPng, garmentPng, garmentDes);
+    const inputHash = tryOnInputHash(personPng, garmentPng, garmentDes, settings.model.version);
     const garmentHash = createHash("sha256").update(garmentPng).digest("hex");
     const cachedResultUrl = await getCachedTryOnResult(redis, inputHash);
     const jobId = randomUUID();
@@ -274,39 +240,42 @@ export async function POST(request: Request) {
     }
     activeJob = pendingJob;
 
-    // A prior request may have populated the cache after this request's first lookup.
+    if (!replicate) return errorResponse("Try-on generation is offline and no saved result exists for this garment yet.", 503);
     const lateCachedResultUrl = await getCachedTryOnResult(redis, inputHash);
-    if (lateCachedResultUrl) {
-      const cachedJob = { ...pendingJob, status: "succeeded" as const, resultUrl: lateCachedResultUrl, cached: true };
+    let prepared: Awaited<ReturnType<typeof buildDiffusionInputs>> | null = null;
+    if (!lateCachedResultUrl) {
+      prepared = await withReplicateRetry(() => buildDiffusionInputs(replicate, personPng, garmentPng, garmentDes));
+      activeJob = { ...pendingJob, prep: prepared.prep };
+      await saveTryOnJob(redis, activeJob);
+    }
+    const predictionResult = await createTryOnPredictionForNewInput(redis, {
+      cachedResult: lateCachedResultUrl,
+      createPrediction: async () => {
+        if (!prepared) throw new Error("Try-on images are unavailable for prediction.");
+        const createdPrediction = await withReplicateRetry(() => replicate.predictions.create({
+          version: prepared.version,
+          input: prepared.input,
+          wait: false,
+        }));
+        predictionId = createdPrediction.id;
+        return createdPrediction;
+      },
+    });
+    if (predictionResult.kind === "cache-hit") {
+      const cachedJob = { ...pendingJob, status: "succeeded" as const, resultUrl: predictionResult.value, cached: true };
       await saveTryOnJob(redis, cachedJob);
       await releaseActiveTryOn(redis, inputHash, jobId);
-      return NextResponse.json({ jobId, status: "succeeded", resultUrl: lateCachedResultUrl });
+      return NextResponse.json({ jobId, status: "succeeded", resultUrl: predictionResult.value, cached: true });
     }
-
-    const replicate = new Replicate({ auth: token });
-
-    const [humanImg, garmImg] = await Promise.all([
-      withReplicateRetry(() => toModelImage(replicate, personPng, "person.png")),
-      withReplicateRetry(() => toModelImage(replicate, garmentPng, "garment.png")),
-    ]);
-
-    const prediction = await createPredictionWithDailySpendGuard(redis, () =>
-      withReplicateRetry(() => replicate.predictions.create({
-        version: MODEL_VERSION,
-        input: {
-          human_img: humanImg,
-          garm_img: garmImg,
-          garment_des: garmentDes,
-        },
-        wait: false,
-      })),
-    );
+    if (predictionResult.kind !== "created") throw new Error("Try-on request could not start a new prediction.");
+    const prediction = predictionResult.value;
     predictionId = prediction.id;
 
     const initialStatus: TryOnStatus =
       prediction.status === "processing" ? "processing" : "queued";
     const job: TryOnJob = {
       ...pendingJob,
+      prep: prepared?.prep,
       predictionId: prediction.id,
       status: initialStatus,
     };
@@ -317,9 +286,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ jobId }, { status: 202 });
   } catch (error) {
     if (predictionId) {
-      const replicate = new Replicate({ auth: token });
       const idToCancel = predictionId;
-      await withReplicateRetry(() => replicate.predictions.cancel(idToCancel)).catch(() => undefined);
+      await withReplicateRetry(async () => { if (replicate) await replicate.predictions.cancel(idToCancel); }).catch(() => undefined);
     }
 
     const message = error instanceof Error ? error.message : "Unexpected error while running virtual try-on.";
@@ -346,6 +314,7 @@ export async function POST(request: Request) {
     }
 
     if (error instanceof DailyTryOnLimitError) {
+      console.warn(JSON.stringify({ event: "tryon_daily_spend_limit_reached", retryAfter: error.retryAfter }));
       return NextResponse.json(
         { error: "The daily try-on limit has been reached. Please try again after midnight UTC." },
         { status: 429, headers: { "Retry-After": String(error.retryAfter) } },
@@ -354,9 +323,12 @@ export async function POST(request: Request) {
 
     console.error(JSON.stringify({ event: "tryon_prediction_start_failed", retryable: isRetryableReplicateError(error) }));
 
+    if (error instanceof GarmentPhotoError) return errorResponse(error.message, error.status);
+    if (error instanceof GarmentSegmentationError) return errorResponse(error.message, error.status);
     if (/unauthor|invalid token|401/i.test(message)) {
       return errorResponse("Replicate could not authenticate the request. Check REPLICATE_API_TOKEN on the server.", 401);
     }
+    if (/too small|preprocessing|clothing mask|timed out/i.test(message)) return errorResponse(message, 502);
     return errorResponse("Could not start the virtual try-on. Please try again.", 502);
   }
 }

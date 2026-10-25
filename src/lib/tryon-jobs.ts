@@ -13,6 +13,17 @@ export type TryOnJob = {
   error?: string;
   retryable?: boolean;
   cached?: boolean;
+  prep?: {
+    model: string;
+    version: string;
+    personUrl: string;
+    garmentUrl: string;
+    bodyMaskUrl: string;
+    clothingMaskUrl: string;
+    pose: unknown;
+    densePose: null;
+    garmentColor: { r: number; g: number; b: number };
+  };
 };
 
 const JOB_TTL_SECONDS = 24 * 60 * 60;

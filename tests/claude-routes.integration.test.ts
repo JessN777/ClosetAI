@@ -38,7 +38,7 @@ function baseServices(): ClaudeRouteServices {
     getCloset: async () => closet, getPreferences: async () => preferences,
     getProfile: async () => null, saveProfile: async () => {},
     getCache: async () => null, setCache: async () => {},
-    limit: async () => ({ success: true, reset: NOW + 60_000 }),
+    reserveDailyCall: async () => ({ success: true, reset: NOW + 60_000 }),
     recommend: async () => recommendation, buildProfile: async () => profile, match: async () => matches,
   };
 }
@@ -63,20 +63,31 @@ test("outfit route returns 400 for invalid input", async () => {
   assert.match((await response.json()).error, /occasion/);
 });
 
-test("outfit route returns 429 with Retry-After when limited", async () => {
+test("outfit route returns 429 with Retry-After when the daily cap is reached", async () => {
   process.env.PROFILE_SESSION_SECRET = "claude-route-test-secret";
-  setClaudeRouteTestOverrides({ ...baseServices(), limit: async () => ({ success: false, reset: NOW + 50_000 }) });
+  setClaudeRouteTestOverrides({ ...baseServices(), reserveDailyCall: async () => ({ success: false, reset: NOW + 50_000 }) });
   const response = await recommendPost(request("/api/outfits/recommend", { occasion: "everyday", weather: "mild" }));
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "50");
 });
 
+test("invalid requests do not reserve a daily LLM call", async () => {
+  process.env.PROFILE_SESSION_SECRET = "claude-route-test-secret";
+  let reservations = 0;
+  setClaudeRouteTestOverrides({ ...baseServices(), reserveDailyCall: async () => { reservations++; return { success: true, reset: NOW + 60_000 }; } });
+  const response = await recommendPost(request("/api/outfits/recommend", {}));
+  assert.equal(response.status, 400);
+  assert.equal(reservations, 0);
+});
+
 test("outfit route serves a validated cache hit without calling Claude", async () => {
   process.env.PROFILE_SESSION_SECRET = "claude-route-test-secret";
-  setClaudeRouteTestOverrides({ ...baseServices(), getCache: async () => recommendation, recommend: async () => { throw new Error("should not call model"); } });
+  let reservations = 0;
+  setClaudeRouteTestOverrides({ ...baseServices(), getCache: async () => recommendation, reserveDailyCall: async () => { reservations++; return { success: true, reset: NOW + 60_000 }; }, recommend: async () => { throw new Error("should not call model"); } });
   const response = await recommendPost(request("/api/outfits/recommend", { occasion: "everyday", weather: "mild" }));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).cached, true);
+  assert.equal(reservations, 0);
 });
 
 test("profile route returns 400 for an invalid look name", async () => {
@@ -87,9 +98,9 @@ test("profile route returns 400 for an invalid look name", async () => {
   assert.match((await response.json()).error, /look name/);
 });
 
-test("profile route returns 429 with Retry-After for an uncached look", async () => {
+test("profile route returns 429 with Retry-After for an uncached look at the daily cap", async () => {
   process.env.PROFILE_SESSION_SECRET = "claude-route-test-secret";
-  setClaudeRouteTestOverrides({ ...baseServices(), limit: async () => ({ success: false, reset: NOW + 40_000 }) });
+  setClaudeRouteTestOverrides({ ...baseServices(), reserveDailyCall: async () => ({ success: false, reset: NOW + 40_000 }) });
   const response = await profilePost(request("/api/looks/profile", { lookName: "Quiet luxury" }));
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "40");
@@ -115,7 +126,7 @@ test("match route returns 400 when look name is absent", async () => {
 test("match route returns 429 with Retry-After on a cache miss", async () => {
   process.env.PROFILE_SESSION_SECRET = "claude-route-test-secret";
   const record: StoredLookProfile = { lookName: profile.lookName, normalizedLookName: "quiet luxury", profile, storedAt: NOW - 1000 };
-  setClaudeRouteTestOverrides({ ...baseServices(), getProfile: async () => record, limit: async () => ({ success: false, reset: NOW + 30_000 }) });
+  setClaudeRouteTestOverrides({ ...baseServices(), getProfile: async () => record, reserveDailyCall: async () => ({ success: false, reset: NOW + 30_000 }) });
   const response = await matchPost(request("/api/looks/match", { lookName: "Quiet luxury" }));
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "30");

@@ -1,0 +1,158 @@
+{
+  "paths": {
+    "livePreview": "MediaPipe-style torso pose, warped as shoulder, torso, and hem pieces",
+    "highQualityRender": "Local padded person and centered garment backdrop only. Set TRYON_EVAL_REMOTE=1 when you are ready to pay for the diffusion model through the server."
+  },
+  "pairs": [
+    {
+      "person": "front-daylight",
+      "garment": "navy-shirt",
+      "livePreview": "live-preview/front-daylight__navy-shirt.png",
+      "diffusionInput": "diffusion-inputs/front-daylight-padded.png + diffusion-inputs/navy-shirt-backdrop.png"
+    },
+    {
+      "person": "front-daylight",
+      "garment": "cream-knit",
+      "livePreview": "live-preview/front-daylight__cream-knit.png",
+      "diffusionInput": "diffusion-inputs/front-daylight-padded.png + diffusion-inputs/cream-knit-backdrop.png"
+    },
+    {
+      "person": "front-daylight",
+      "garment": "black-jacket",
+      "livePreview": "live-preview/front-daylight__black-jacket.png",
+      "diffusionInput": "diffusion-inputs/front-daylight-padded.png + diffusion-inputs/black-jacket-backdrop.png"
+    },
+    {
+      "person": "front-daylight",
+      "garment": "red-sleeve",
+      "livePreview": "live-preview/front-daylight__red-sleeve.png",
+      "diffusionInput": "diffusion-inputs/front-daylight-padded.png + diffusion-inputs/red-sleeve-backdrop.png"
+    },
+    {
+      "person": "front-daylight",
+      "garment": "pattern-top",
+      "livePreview": "live-preview/front-daylight__pattern-top.png",
+      "diffusionInput": "diffusion-inputs/front-daylight-padded.png + diffusion-inputs/pattern-top-backdrop.png"
+    },
+    {
+      "person": "side-window",
+      "garment": "navy-shirt",
+      "livePreview": "live-preview/side-window__navy-shirt.png",
+      "diffusionInput": "diffusion-inputs/side-window-padded.png + diffusion-inputs/navy-shirt-backdrop.png"
+    },
+    {
+      "person": "side-window",
+      "garment": "cream-knit",
+      "livePreview": "live-preview/side-window__cream-knit.png",
+      "diffusionInput": "diffusion-inputs/side-window-padded.png + diffusion-inputs/cream-knit-backdrop.png"
+    },
+    {
+      "person": "side-window",
+      "garment": "black-jacket",
+      "livePreview": "live-preview/side-window__black-jacket.png",
+      "diffusionInput": "diffusion-inputs/side-window-padded.png + diffusion-inputs/black-jacket-backdrop.png"
+    },
+    {
+      "person": "side-window",
+      "garment": "red-sleeve",
+      "livePreview": "live-preview/side-window__red-sleeve.png",
+      "diffusionInput": "diffusion-inputs/side-window-padded.png + diffusion-inputs/red-sleeve-backdrop.png"
+    },
+    {
+      "person": "side-window",
+      "garment": "pattern-top",
+      "livePreview": "live-preview/side-window__pattern-top.png",
+      "diffusionInput": "diffusion-inputs/side-window-padded.png + diffusion-inputs/pattern-top-backdrop.png"
+    },
+    {
+      "person": "dim-room",
+      "garment": "navy-shirt",
+      "livePreview": "live-preview/dim-room__navy-shirt.png",
+      "diffusionInput": "diffusion-inputs/dim-room-padded.png + diffusion-inputs/navy-shirt-backdrop.png"
+    },
+    {
+      "person": "dim-room",
+      "garment": "cream-knit",
+      "livePreview": "live-preview/dim-room__cream-knit.png",
+      "diffusionInput": "diffusion-inputs/dim-room-padded.png + diffusion-inputs/cream-knit-backdrop.png"
+    },
+    {
+      "person": "dim-room",
+      "garment": "black-jacket",
+      "livePreview": "live-preview/dim-room__black-jacket.png",
+      "diffusionInput": "diffusion-inputs/dim-room-padded.png + diffusion-inputs/black-jacket-backdrop.png"
+    },
+    {
+      "person": "dim-room",
+      "garment": "red-sleeve",
+      "livePreview": "live-preview/dim-room__red-sleeve.png",
+      "diffusionInput": "diffusion-inputs/dim-room-padded.png + diffusion-inputs/red-sleeve-backdrop.png"
+    },
+    {
+      "person": "dim-room",
+      "garment": "pattern-top",
+      "livePreview": "live-preview/dim-room__pattern-top.png",
+      "diffusionInput": "diffusion-inputs/dim-room-padded.png + diffusion-inputs/pattern-top-backdrop.png"
+    },
+    {
+      "person": "outdoor-green",
+      "garment": "navy-shirt",
+      "livePreview": "live-preview/outdoor-green__navy-shirt.png",
+      "diffusionInput": "diffusion-inputs/outdoor-green-padded.png + diffusion-inputs/navy-shirt-backdrop.png"
+    },
+    {
+      "person": "outdoor-green",
+      "garment": "cream-knit",
+      "livePreview": "live-preview/outdoor-green__cream-knit.png",
+      "diffusionInput": "diffusion-inputs/outdoor-green-padded.png + diffusion-inputs/cream-knit-backdrop.png"
+    },
+    {
+      "person": "outdoor-green",
+      "garment": "black-jacket",
+      "livePreview": "live-preview/outdoor-green__black-jacket.png",
+      "diffusionInput": "diffusion-inputs/outdoor-green-padded.png + diffusion-inputs/black-jacket-backdrop.png"
+    },
+    {
+      "person": "outdoor-green",
+      "garment": "red-sleeve",
+      "livePreview": "live-preview/outdoor-green__red-sleeve.png",
+      "diffusionInput": "diffusion-inputs/outdoor-green-padded.png + diffusion-inputs/red-sleeve-backdrop.png"
+    },
+    {
+      "person": "outdoor-green",
+      "garment": "pattern-top",
+      "livePreview": "live-preview/outdoor-green__pattern-top.png",
+      "diffusionInput": "diffusion-inputs/outdoor-green-padded.png + diffusion-inputs/pattern-top-backdrop.png"
+    },
+    {
+      "person": "busy-backdrop",
+      "garment": "navy-shirt",
+      "livePreview": "live-preview/busy-backdrop__navy-shirt.png",
+      "diffusionInput": "diffusion-inputs/busy-backdrop-padded.png + diffusion-inputs/navy-shirt-backdrop.png"
+    },
+    {
+      "person": "busy-backdrop",
+      "garment": "cream-knit",
+      "livePreview": "live-preview/busy-backdrop__cream-knit.png",
+      "diffusionInput": "diffusion-inputs/busy-backdrop-padded.png + diffusion-inputs/cream-knit-backdrop.png"
+    },
+    {
+      "person": "busy-backdrop",
+      "garment": "black-jacket",
+      "livePreview": "live-preview/busy-backdrop__black-jacket.png",
+      "diffusionInput": "diffusion-inputs/busy-backdrop-padded.png + diffusion-inputs/black-jacket-backdrop.png"
+    },
+    {
+      "person": "busy-backdrop",
+      "garment": "red-sleeve",
+      "livePreview": "live-preview/busy-backdrop__red-sleeve.png",
+      "diffusionInput": "diffusion-inputs/busy-backdrop-padded.png + diffusion-inputs/red-sleeve-backdrop.png"
+    },
+    {
+      "person": "busy-backdrop",
+      "garment": "pattern-top",
+      "livePreview": "live-preview/busy-backdrop__pattern-top.png",
+      "diffusionInput": "diffusion-inputs/busy-backdrop-padded.png + diffusion-inputs/pattern-top-backdrop.png"
+    }
+  ]
+}

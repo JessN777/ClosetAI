@@ -8,6 +8,9 @@ export const closetItemSchema = z.object({
   silhouette: z.string().trim().max(80).optional(),
   formality: z.string().trim().max(80).optional(),
   fit: z.string().trim().max(80).optional(),
+  // Optional so closet records written before image-backed storage remain readable.
+  imageUrl: z.string().url().max(4096).optional(),
+  createdAt: z.string().datetime().optional(),
 });
 export type ClosetItem = z.infer<typeof closetItemSchema>;
 

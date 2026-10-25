@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getClaudeUsage, lookProfileSchema, matchProfileOutputSchema, validateMatchClosetIds, type ClosetItem } from "@/lib/claude";
 import { hashDemoInput } from "@/lib/claude/canonical";
 import { getClaudeRouteServices, normalizeLookName, resultCacheKey, resultCacheTtlSeconds } from "@/lib/claude/route-runtime";
-import { apiFailure, enforceClaudeRateLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
+import { apiFailure, enforceClaudeDailyLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
 import { matchProfileRequestSchema } from "@/lib/claude/schemas";
 import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@/lib/personal-session";
 
@@ -48,7 +48,7 @@ export async function POST(request: Request) {
       log.cache = "hit";
       return attachCookie(NextResponse.json({ profile: storedProfile, matches, cached: true }));
     }
-    const limited = await enforceClaudeRateLimit(redis, session.id, log);
+    const limited = await enforceClaudeDailyLimit(redis, log);
     if (limited) return attachCookie(limited);
     const matches = await services.match(storedProfile, closet);
     setRouteUsage(log, getClaudeUsage(matches));

@@ -27,6 +27,28 @@ export function hasTryOnStorageConfig() {
   return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 }
 
+export async function persistTryOnPng(inputHash: string, pngBytes: Buffer) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceRoleKey) throw new Error("Supabase Storage is not configured on the server.");
+  if (!pngBytes.byteLength || pngBytes.byteLength > MAX_RESULT_BYTES) {
+    throw new Error("The finished try-on image is empty or larger than the 25 MB storage limit.");
+  }
+  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+  });
+  const path = `${inputHash}.png`;
+  const { error: uploadError } = await supabase.storage.from(BUCKET_NAME).upload(
+    path,
+    new Blob([new Uint8Array(pngBytes)], { type: "image/png" }),
+    { cacheControl: "31536000", contentType: "image/png", upsert: true },
+  );
+  if (uploadError) throw new Error(`Could not upload the try-on image: ${uploadError.message}`);
+  const { data } = supabase.storage.from(BUCKET_NAME).getPublicUrl(path);
+  if (!data.publicUrl) throw new Error("Supabase did not return a public URL for the stored image.");
+  return data.publicUrl;
+}
+
 export async function persistTryOnResult(inputHash: string, replicateUrl: string) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;

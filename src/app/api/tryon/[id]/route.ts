@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import Replicate from "replicate";
 import { acquireTryOnPollLock, getCachedGarmentResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, releaseTryOnPollLock, saveCachedGarmentResult, saveCachedTryOnResult, saveTryOnJob } from "@/lib/tryon-jobs";
-import { persistTryOnResult } from "@/lib/tryon-storage";
+import { persistTryOnPng } from "@/lib/tryon-storage";
+import { finishDiffusionOutput } from "@/lib/tryon-pipeline";
 import { withReplicateRetry } from "@/lib/replicate-retry";
+import { demoTryOnResultUrl } from "@/lib/demo-tryon";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,8 +49,9 @@ export async function GET(
     return errorResponse("Try-on job not found.", 404);
   }
 
-  if (process.env.DEMO_OFFLINE === "1" && id === "00000000-0000-4000-8000-000000000001") {
-    return NextResponse.json({ status: "succeeded", resultUrl: "/demo/tryon-result.png", cached: true }, { headers: { "Cache-Control": "no-store" } });
+  if (process.env.DEMO_OFFLINE === "1") {
+    const resultUrl = demoTryOnResultUrl(id);
+    if (resultUrl) return NextResponse.json({ status: "succeeded", resultUrl, cached: true }, { headers: { "Cache-Control": "no-store" } });
   }
 
   const redis = getTryOnRedis();
@@ -91,7 +94,8 @@ export async function GET(
           updated = { ...job, status: "failed", error: "The try-on finished without returning an image.", retryable: false };
         } else {
           try {
-            const resultUrl = await persistTryOnResult(job.inputHash, replicateUrl);
+            const finished = await finishDiffusionOutput(replicate, replicateUrl, job.prep?.garmentColor);
+            const resultUrl = await persistTryOnPng(job.inputHash, finished);
             updated = { ...job, status: "succeeded", resultUrl, error: undefined, retryable: false };
           } catch {
             updated = {

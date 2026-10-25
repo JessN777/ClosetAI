@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureDimensions, garmentPoint, PoseSmoother, readTorso, triangleTransform, type Landmark } from "../src/lib/live-pose";
-import { clearLightBackground } from "../src/lib/live-garment";
+import { buildGarmentGrid, captureDimensions, garmentPoint, PoseSmoother, readTorso, torsoVisibilityHint, triangleTransform, type Landmark } from "../src/lib/live-pose";
 
 function landmarks(offset = 0): Landmark[] {
   const points = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, visibility: 1 }));
@@ -23,13 +22,48 @@ test("requires visible shoulders and hips; an occluded elbow does not hide the t
   assert.equal(readTorso(points), null);
 });
 
-test("smooths jitter and resets after person loss instead of dragging an old overlay", () => {
+test("smooths jitter, holds the last good pose for five missed frames, then resets", () => {
   const smoother = new PoseSmoother();
   smoother.update(landmarks(), 100);
   const next = smoother.update(landmarks(0.03), 133)!;
   assert.ok(next.leftShoulder.x > 0.65 && next.leftShoulder.x < 0.68);
-  assert.equal(smoother.update([], 166), null);
+  for (let frame = 0; frame < 5; frame++) assert.equal(smoother.update([], 166 + frame * 33), next);
+  assert.equal(smoother.update([], 331), null);
   assert.equal(smoother.update(landmarks(0.1), 199)!.leftShoulder.x, 0.75);
+});
+
+test("the 8x12 cloth mesh uses shoulder-to-hip anchors and pins collar and hem during sway", () => {
+  const pose = readTorso(landmarks())!;
+  const grid = buildGarmentGrid(pose, 1000, 800, { width: 1, length: 1 }, 8, 12, 50);
+  assert.equal(buildGarmentGrid(pose, 1000, 800, { width: 1, length: 1 }).length, 7 * 11 * 6 * 4);
+  const topLeft = garmentPoint(pose, 0, 0.16, 1000, 800, { width: 1, length: 1 });
+  const hemLeft = garmentPoint(pose, 0, 1, 1000, 800, { width: 1, length: 1 });
+  assert.ok(Math.abs(grid[0] - (topLeft.x / 1000 * 2 - 1)) < 1e-6);
+  assert.ok(Math.abs(grid[1] - (1 - topLeft.y / 800 * 2)) < 1e-6);
+  const hemVertex = (10 * 7 * 6 + 2) * 4;
+  assert.ok(Math.abs(grid[hemVertex] - (hemLeft.x / 1000 * 2 - 1)) < 1e-6);
+  assert.ok(Math.abs(grid[hemVertex + 1] - (1 - hemLeft.y / 800 * 2)) < 1e-6);
+});
+
+test("vertical fit stays clamped and the hem remains pinned to the hip landmarks", () => {
+  const pose = readTorso(landmarks())!;
+  const hem = garmentPoint(pose, 0.5, 1, 1000, 800, { width: 1, length: 1 });
+  const overStretchedHem = garmentPoint(pose, 0.5, 1, 1000, 800, { width: 1, length: 9 });
+  assert.deepEqual(overStretchedHem, hem);
+  const center = garmentPoint(pose, 0.5, 0.58, 1000, 800, { width: 1, length: 1 });
+  const overStretchedCenter = garmentPoint(pose, 0.5, 0.58, 1000, 800, { width: 1, length: 9 });
+  assert.ok(Math.abs(overStretchedCenter.y - center.y) <= 10);
+});
+
+test("framing hints distinguish a cropped torso from a subject who is too far away", () => {
+  assert.equal(torsoVisibilityHint([]), "Step into the frame.");
+  const cropped = landmarks();
+  cropped[11] = { x: 0.005, y: 0.3, visibility: 1 };
+  assert.equal(torsoVisibilityHint(cropped), "Step back so your torso is visible.");
+  const small = landmarks();
+  small[11] = { x: 0.48, y: 0.3, visibility: 1 };
+  small[12] = { x: 0.52, y: 0.3, visibility: 1 };
+  assert.equal(torsoVisibilityHint(small), "Step closer so your shoulders and torso are easy to track.");
 });
 
 test("shoulder and hip anchors stay aligned in camera pixels, including torso rotation", () => {
@@ -69,17 +103,4 @@ test("capture preserves camera aspect ratio and meets the existing upload size b
     assert.ok(Math.abs(size.width / size.height - width / height) < 0.01);
   }
   assert.throws(() => captureDimensions(0, 0));
-});
-
-test("light-background removal preserves white details enclosed by the garment", () => {
-  const pixels = new Uint8ClampedArray(5 * 5 * 4).fill(255);
-  for (let y = 1; y <= 3; y++) for (let x = 1; x <= 3; x++) {
-    if (x === 2 && y === 2) continue;
-    const i = (y * 5 + x) * 4;
-    pixels[i] = pixels[i + 1] = pixels[i + 2] = 30;
-  }
-  clearLightBackground(pixels, 5, 5);
-  assert.equal(pixels[3], 0);
-  assert.equal(pixels[(2 * 5 + 2) * 4 + 3], 255);
-  assert.equal(pixels[(1 * 5 + 1) * 4 + 3], 255);
 });

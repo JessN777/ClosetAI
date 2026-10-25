@@ -1,4 +1,5 @@
 import type { Redis } from "@upstash/redis";
+import { randomUUID } from "node:crypto";
 
 const TWO_DAYS_SECONDS = 2 * 24 * 60 * 60;
 
@@ -46,17 +47,66 @@ export async function createPredictionWithDailySpendGuard<T>(
 
   const now = options.now ?? Date.now();
   const key = dailyTryOnSpendKey(now);
-  const currentValue = await redis.get<number | string>(key);
-  const current = currentValue === null ? 0 : Number(currentValue);
-  if (!Number.isSafeInteger(current) || current < 0) {
-    throw new Error("Could not read the daily try-on spend counter.");
+  const lockKey = `${key}:lock`;
+  const lockId = randomUUID();
+  let acquired = await redis.set(lockKey, lockId, { nx: true, ex: 120 }) === "OK";
+  for (let attempt = 0; !acquired && attempt < 12; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    acquired = await redis.set(lockKey, lockId, { nx: true, ex: 120 }) === "OK";
   }
-  if (current >= dailyTryOnLimit(env)) {
-    throw new DailyTryOnLimitError(secondsUntilUtcMidnight(now));
-  }
+  if (!acquired) throw new Error("The daily try-on spend guard is busy. Please retry shortly.");
 
-  const prediction = await createPrediction();
-  await redis.incr(key);
-  await redis.expire(key, TWO_DAYS_SECONDS);
-  return prediction;
+  try {
+    const currentValue = await redis.get<number | string>(key);
+    const current = currentValue === null ? 0 : Number(currentValue);
+    if (!Number.isSafeInteger(current) || current < 0) {
+      throw new Error("Could not read the daily try-on spend counter.");
+    }
+    if (current >= dailyTryOnLimit(env)) {
+      throw new DailyTryOnLimitError(secondsUntilUtcMidnight(now));
+    }
+
+    const prediction = await createPrediction();
+    await redis.incr(key);
+    await redis.expire(key, TWO_DAYS_SECONDS);
+    return prediction;
+  } finally {
+    await redis.eval<string[], number>(
+      `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+       return 0`,
+      [lockKey],
+      [lockId],
+    );
+  }
+}
+
+/** Routes existing work and invalid input around the billable prediction path. */
+export async function createTryOnPredictionForNewInput<T, TExisting = T, TError = unknown, TCache = T>(
+  redis: Redis,
+  input: {
+    validationError?: TError | null;
+    cachedResult?: TCache | null;
+    existingJob?: TExisting | null;
+    createPrediction: () => Promise<T>;
+  },
+  options: { now?: number; env?: NodeJS.ProcessEnv } = {},
+): Promise<
+  | { kind: "validation-error"; value: TError }
+  | { kind: "cache-hit"; value: TCache }
+  | { kind: "existing-job"; value: TExisting }
+  | { kind: "created"; value: T }
+> {
+  if (input.validationError !== undefined && input.validationError !== null) {
+    return { kind: "validation-error", value: input.validationError };
+  }
+  if (input.cachedResult !== undefined && input.cachedResult !== null) {
+    return { kind: "cache-hit", value: input.cachedResult };
+  }
+  if (input.existingJob !== undefined && input.existingJob !== null) {
+    return { kind: "existing-job", value: input.existingJob };
+  }
+  return {
+    kind: "created",
+    value: await createPredictionWithDailySpendGuard(redis, input.createPrediction, options),
+  };
 }

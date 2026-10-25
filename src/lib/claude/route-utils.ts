@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { ClaudeDecisionError, getClaudeModel, type ClaudeUsage } from "@/lib/claude";
-import type { RateResult } from "@/lib/claude/route-runtime";
 import { getClaudeRouteServices } from "@/lib/claude/route-runtime";
 import type { Redis } from "@upstash/redis";
 
@@ -47,16 +46,18 @@ export function apiFailure(log: ClaudeRouteLog, code: string, message: string, s
   return NextResponse.json({ error: message }, { status, headers });
 }
 
-export async function enforceClaudeRateLimit(redis: Redis, userId: string, log: ClaudeRouteLog) {
-  let result: RateResult;
-  try { result = await getClaudeRouteServices().limit(redis, userId); }
+export async function enforceClaudeDailyLimit(redis: Redis, log: ClaudeRouteLog) {
+  const services = getClaudeRouteServices();
+  let result;
+  try { result = await services.reserveDailyCall(redis, services.now()); }
   catch {
-    log.errorCode = "RATE_LIMIT_UNAVAILABLE";
-    return apiFailure(log, "RATE_LIMIT_UNAVAILABLE", "The styling service is temporarily unavailable.", 503);
+    log.errorCode = "DAILY_LIMIT_UNAVAILABLE";
+    return apiFailure(log, "DAILY_LIMIT_UNAVAILABLE", "The styling service is temporarily unavailable.", 503);
   }
   if (result.success) return null;
-  const retryAfter = Math.max(1, Math.ceil((result.reset - getClaudeRouteServices().now()) / 1000));
-  return apiFailure(log, "RATE_LIMITED", "You have reached the styling request limit. Try again later.", 429, { "Retry-After": String(retryAfter) });
+  log.errorCode = "DAILY_LIMIT_REACHED";
+  const retryAfter = Math.max(1, Math.ceil((result.reset - services.now()) / 1000));
+  return apiFailure(log, "DAILY_LIMIT_REACHED", "The daily styling request limit has been reached. Please try again after midnight UTC.", 429, { "Retry-After": String(retryAfter) });
 }
 
 export function parseBodyError(issues: Array<{ path?: Array<string | number>; message?: string }>) {

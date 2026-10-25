@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
-import { Ratelimit } from "@upstash/ratelimit";
 import type { Redis } from "@upstash/redis";
 import { buildLookProfile, matchProfileToCloset, recommendOutfit, type BuildLookProfileInput, type LookProfile, type ProfileClosetMatches, type RecommendOutfitInput, type OutfitRecommendation, type ClosetItem } from "@/lib/claude";
+import { reserveDailyLlmCall, type DailyLlmLimitResult } from "@/lib/claude/daily-limit";
 import { getTryOnRedis } from "@/lib/tryon-jobs";
 import { getClosetInventory } from "@/lib/closet-storage";
 import { preferencesSchema, type StylePreferences } from "@/lib/claude/schemas";
 
 export type StoredLookProfile = { normalizedLookName: string; lookName: string; profile: LookProfile; storedAt: number };
-export type RateResult = { success: boolean; reset: number };
-
 export type ClaudeRouteServices = {
   getRedis: () => Redis | null;
   now: () => number;
@@ -18,7 +16,7 @@ export type ClaudeRouteServices = {
   saveProfile: (redis: Redis, userId: string, profile: StoredLookProfile) => Promise<void>;
   getCache: (redis: Redis, key: string) => Promise<unknown | null>;
   setCache: (redis: Redis, key: string, value: unknown, ttlSeconds: number) => Promise<void>;
-  limit: (redis: Redis, userId: string) => Promise<RateResult>;
+  reserveDailyCall: (redis: Redis, now: number) => Promise<DailyLlmLimitResult>;
   recommend: (input: RecommendOutfitInput) => Promise<OutfitRecommendation>;
   buildProfile: (input: BuildLookProfileInput) => Promise<LookProfile>;
   match: (profile: LookProfile, closet: ClosetItem[]) => Promise<ProfileClosetMatches>;
@@ -29,7 +27,6 @@ const PROFILE_TTL = 30 * DAY;
 const CLOSET_PROFILE_KEY = "closetai:profile:v1:";
 const CLAUDE_PROFILE_KEY = "closetai:claude:look-profile:v1:";
 const CACHE_PREFIX = "closetai:claude:result:v1:";
-const RATE_PREFIX = "closetai:claude:rate:v1";
 
 function safeKeyPart(value: string) { return createHash("sha256").update(value).digest("hex"); }
 function profileKey(userId: string, lookName: string) { return CLAUDE_PROFILE_KEY + safeKeyPart(userId) + ":" + safeKeyPart(lookName); }
@@ -51,11 +48,7 @@ const productionServices: ClaudeRouteServices = {
   },
   async getCache(redis, key) { return await redis.get<unknown>(key); },
   async setCache(redis, key, value, ttlSeconds) { await redis.set(key, value, { ex: ttlSeconds }); },
-  async limit(redis, userId) {
-    const limiter = new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(20, "1 h"), prefix: RATE_PREFIX, analytics: false });
-    const result = await limiter.limit(safeKeyPart(userId));
-    return { success: result.success, reset: result.reset };
-  },
+  async reserveDailyCall(redis, now) { return await reserveDailyLlmCall(redis, now); },
   recommend: recommendOutfit,
   buildProfile: buildLookProfile,
   match: matchProfileToCloset,

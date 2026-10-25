@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getClaudeUsage, recommendOutfitInputSchema, recommendOutfitOutputSchema, type ClosetItem } from "@/lib/claude";
 import { hashDemoInput } from "@/lib/claude/canonical";
 import { getClaudeRouteServices, resultCacheKey, resultCacheTtlSeconds } from "@/lib/claude/route-runtime";
-import { apiFailure, enforceClaudeRateLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
+import { apiFailure, enforceClaudeDailyLimit, parseBodyError, runClaudeApiRoute, setRouteUsage } from "@/lib/claude/route-utils";
 import { recommendOutfitRequestSchema, preferencesSchema } from "@/lib/claude/schemas";
 import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@/lib/personal-session";
 import { DEMO_PREFERENCES } from "@/lib/demo-state";
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
         return attachCookie(NextResponse.json({ ...result, cached: true }));
       }
     }
-    const limited = await enforceClaudeRateLimit(redis, session.id, log);
+    const limited = await enforceClaudeDailyLimit(redis, log);
     if (limited) return attachCookie(limited);
     const result = await services.recommend(input);
     setRouteUsage(log, getClaudeUsage(result));

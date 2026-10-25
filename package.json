@@ -8,10 +8,11 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "tsx --test tests/*.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "seed:closet": "tsx scripts/seed-closet.ts",
+    "eval:garment-fixtures": "tsx scripts/evaluate-garment-fixtures.ts"
   },
   "dependencies": {
-    "@imgly/background-removal-node": "^1.4.5",
     "@mediapipe/tasks-vision": "1.1.1",
     "@supabase/supabase-js": "^2.118.0",
     "@upstash/ratelimit": "^2.2.0",
