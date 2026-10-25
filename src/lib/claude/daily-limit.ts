@@ -4,7 +4,7 @@ const TWO_DAYS_SECONDS = 2 * 24 * 60 * 60;
 
 export type DailyLlmLimitResult = { success: boolean; reset: number };
 
-export function dailyLlmLimit(env: NodeJS.ProcessEnv = process.env) {
+export function dailyLlmLimit(env: Record<string, string | undefined> = process.env) {
   const parsed = Number(env.DAILY_LLM_LIMIT ?? "200");
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 200;
 }
@@ -25,10 +25,10 @@ export function nextUtcMidnight(now = Date.now()) {
 export async function reserveDailyLlmCall(
   redis: Redis,
   now = Date.now(),
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env,
 ): Promise<DailyLlmLimitResult> {
   const key = dailyLlmSpendKey(now);
-  const result = await redis.eval<number[]>(
+  const result = await redis.eval<string[], number[]>(
     `local current = tonumber(redis.call('GET', KEYS[1]) or '0')
      local limit = tonumber(ARGV[1])
      if not current or current < 0 then return redis.error_reply('invalid daily LLM counter') end

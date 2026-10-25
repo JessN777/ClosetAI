@@ -9,6 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from health import moss_health
 
 load_dotenv(Path(__file__).with_name(".env"))
 app = FastAPI(docs_url=None, redoc_url=None)
@@ -17,10 +18,8 @@ deployment_file = Path(os.getenv("MOSS_DEPLOYMENT_STATUS_PATH", Path(__file__).w
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    configured = all(os.getenv(key) for key in ("MOSS_PROJECT_ID", "MOSS_PROJECT_KEY", "MOSS_VOICE_AGENT_ID"))
-    deployed = deployment_file.exists()
-    return {"status": "ok" if configured and deployed else "offline"}
+def health() -> dict[str, object]:
+    return moss_health(deployment_path=deployment_file)
 
 
 @app.get("/metrics")

@@ -10,6 +10,7 @@ import ShopTheLookPanel from "@/components/ShopTheLookPanel";
 import type { ShopLookPlan } from "@/lib/shop-types";
 import DataUsePanel from "@/components/DataUsePanel";
 import { addBuildLookSelection, requestBuildThisLook, type BuildLookVoiceContext } from "@/lib/build-look-events";
+import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 
 type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 type SpeechResultEvent = Event & { results: { isFinal: boolean; 0: { transcript: string } }[]; resultIndex: number };
@@ -27,7 +28,10 @@ type SpeechRecognitionLike = {
 type WindowWithSpeech = Window & { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike };
 type ToolCall = { id: string; name: string; arguments: string };
 type HistoryItem = { role: "user" | "assistant"; content: string };
-type MossStatus = { online: boolean; latencyMs: number | null; message: string };
+type MossStatus = { online: boolean; checked: boolean; latencyMs: number | null; message: string; reason?: string | null; agentIdPrefix?: string | null };
+declare global {
+  interface Window { __closetAiMossTestTransport?: { sendText: (text: string) => Promise<string> } }
+}
 type Preferences = { favoriteColors: string[]; fit: string[]; occasions: string[]; budget: { min?: number; max?: number; currency: "USD" }; sizes: Record<string, string>; version: number; updatedAt: number | null };
 const emptyPreferences: Preferences = { favoriteColors: [], fit: [], occasions: [], budget: { currency: "USD" }, sizes: {}, version: 0, updatedAt: null };
 
@@ -64,7 +68,7 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
   const [styleMatches, setStyleMatches] = useState<StyleMatchLists | null>(null);
   const [shopPlan, setShopPlan] = useState<ShopLookPlan | null>(null);
   const [buildLookContext, setBuildLookContext] = useState<BuildLookVoiceContext | null>(null);
-  const [mossStatus, setMossStatus] = useState<MossStatus>({ online: false, latencyMs: null, message: "Moss voice agent is offline. Browser voice is available." });
+  const [mossStatus, setMossStatus] = useState<MossStatus>({ online: false, checked: false, latencyMs: null, message: "Checking Moss voice agent…" });
   const [supported, setSupported] = useState(true);
   const turnRef = useRef(0);
   const mountedRef = useRef(false);
@@ -72,6 +76,9 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const demoAudioRef = useRef<HTMLAudioElement | null>(null);
   const demoPlaybackRef = useRef(0);
+  const mossRoomRef = useRef<Room | null>(null);
+  const mossRoomPendingRef = useRef<Promise<Room> | null>(null);
+  const audioContainerRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef(state);
   const buildLookContextRef = useRef(buildLookContext);
   stateRef.current = state;
@@ -97,7 +104,7 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
       setStyleNotes("Reference style: relaxed navy layers and clean, minimal tailoring.");
       setProfileReady(true);
       setSupported(false);
-      setMossStatus({ online: false, latencyMs: null, message: "Offline demo · Moss agent unavailable; scripted audio is replayed locally." });
+      setMossStatus({ online: false, checked: true, latencyMs: null, message: "Offline demo · Moss agent unavailable; scripted audio is replayed locally." });
       return () => { active = false; mountedRef.current = false; demoAudioRef.current?.pause(); window.speechSynthesis?.cancel(); };
     }
     void fetch("/api/preferences", { cache: "no-store" }).then(async (response) => {
@@ -112,9 +119,9 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
       try {
         const response = await fetch("/api/voice-agent/status", { cache: "no-store", signal: AbortSignal.timeout(2500) });
         const status = await response.json() as Partial<MossStatus>;
-        if (active) setMossStatus({ online: status.online === true, latencyMs: typeof status.latencyMs === "number" ? status.latencyMs : null, message: typeof status.message === "string" ? status.message : "Moss voice agent is offline. Browser voice is available." });
+        if (active) setMossStatus({ online: status.online === true, checked: true, latencyMs: typeof status.latencyMs === "number" ? status.latencyMs : null, message: typeof status.message === "string" ? status.message : "Moss agent offline. Browser fallback is available.", reason: typeof status.reason === "string" ? status.reason : null, agentIdPrefix: typeof status.agentIdPrefix === "string" ? status.agentIdPrefix : null });
       } catch {
-        if (active) setMossStatus({ online: false, latencyMs: null, message: "Moss voice agent is offline. Browser voice is available." });
+        if (active) setMossStatus({ online: false, checked: true, latencyMs: null, message: "Moss voice agent is offline. Browser voice is available.", reason: "health_unreachable" });
       }
     };
     void refreshMossStatus();
@@ -125,6 +132,8 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
       mountedRef.current = false;
       requestRef.current?.abort();
       recognitionRef.current?.abort();
+      mossRoomRef.current?.disconnect();
+      mossRoomRef.current = null;
       window.speechSynthesis?.cancel();
       demoAudioRef.current?.pause();
     };
@@ -149,6 +158,58 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
   }
 
   function addLog(entry: string) { setLog((items) => [entry, ...items].slice(0, 4)); }
+
+  async function connectMossRoom(signal: AbortSignal): Promise<Room> {
+    if (mossRoomRef.current?.state === ConnectionState.Connected) return mossRoomRef.current;
+    if (mossRoomPendingRef.current) return mossRoomPendingRef.current;
+    const pending = (async () => {
+      const response = await fetch("/api/voice-agent/session", { method: "POST", cache: "no-store", signal });
+      const payload = await response.json().catch(() => ({})) as { serverUrl?: unknown; participantToken?: unknown; error?: unknown; reason?: unknown };
+      if (!response.ok || typeof payload.serverUrl !== "string" || typeof payload.participantToken !== "string") {
+        const reason = typeof payload.reason === "string" ? payload.reason : "session_unavailable";
+        throw new Error(typeof payload.error === "string" ? `${payload.error} (${reason})` : `Moss session is unavailable (${reason}).`);
+      }
+
+      const room = new Room({ adaptiveStream: true, dynacast: true });
+      room.on(RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind !== Track.Kind.Audio || !audioContainerRef.current) return;
+        const audio = track.attach();
+        audio.autoplay = true;
+        audioContainerRef.current.appendChild(audio);
+      });
+      room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+        if (participant?.isLocal) return;
+        const content = segments.map((segment) => segment.text).join(" ").trim();
+        if (!content) return;
+        setResponseText(content);
+        if (segments.some((segment) => segment.final)) {
+          setHistory((items) => [...items, { role: "assistant", content } satisfies HistoryItem].slice(-8));
+          addLog("Received a reply from the Moss agent");
+        }
+      });
+      room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        setState(speakers.some((participant) => !participant.isLocal) ? "speaking" : "idle");
+      });
+      room.on(RoomEvent.Disconnected, () => {
+        if (mossRoomRef.current !== room) return;
+        mossRoomRef.current = null;
+        setMossStatus((current) => ({ ...current, online: false, checked: true, reason: "session_disconnected", message: "Moss agent disconnected. Browser fallback is available." }));
+        setState("idle");
+      });
+      try {
+        await room.connect(payload.serverUrl, payload.participantToken);
+        if (signal.aborted) throw new DOMException("The Moss connection was cancelled.", "AbortError");
+        mossRoomRef.current = room;
+        return room;
+      } catch (error) {
+        room.disconnect();
+        throw error;
+      }
+    })();
+    mossRoomPendingRef.current = pending;
+    try { return await pending; }
+    finally { if (mossRoomPendingRef.current === pending) mossRoomPendingRef.current = null; }
+  }
 
   async function executeTool(call: ToolCall, signal: AbortSignal): Promise<string> {
     if (signal.aborted) return "That action was cancelled.";
@@ -295,6 +356,51 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
     requestRef.current = controller;
     const newHistory: HistoryItem[] = [...history, { role: "user", content: normalized } satisfies HistoryItem].slice(-8);
     try {
+      let mossOnline = mossStatus.online;
+      if (!demoOffline && !mossStatus.checked) {
+        try {
+          const response = await fetch("/api/voice-agent/status", { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2500)]) });
+          const status = await response.json() as Partial<MossStatus>;
+          mossOnline = status.online === true;
+          setMossStatus({ online: mossOnline, checked: true, latencyMs: typeof status.latencyMs === "number" ? status.latencyMs : null, message: typeof status.message === "string" ? status.message : "Moss agent offline. Browser fallback is available.", reason: typeof status.reason === "string" ? status.reason : null, agentIdPrefix: typeof status.agentIdPrefix === "string" ? status.agentIdPrefix : null });
+        } catch {
+          if (controller.signal.aborted) return;
+          mossOnline = false;
+          setMossStatus({ online: false, checked: true, latencyMs: null, message: "Moss voice agent is offline. Browser fallback is available.", reason: "health_unreachable" });
+        }
+      }
+      if (!demoOffline && mossOnline) {
+        try {
+          let mossReply: string | null = null;
+          if (process.env.NODE_ENV !== "production" && window.__closetAiMossTestTransport) {
+            mossReply = await window.__closetAiMossTestTransport.sendText(normalized);
+          } else {
+            const room = await connectMossRoom(AbortSignal.any([controller.signal, AbortSignal.timeout(12_000)]));
+            if (!mountedRef.current || turn !== turnRef.current || controller.signal.aborted) return;
+            await room.localParticipant.sendText(normalized, { topic: "lk.chat" });
+          }
+          if (!mountedRef.current || turn !== turnRef.current || controller.signal.aborted) return;
+          setHistory(mossReply
+            ? [...newHistory, { role: "assistant", content: mossReply } satisfies HistoryItem].slice(-8)
+            : newHistory);
+          if (mossReply) {
+            setResponseText(mossReply);
+            addLog("Sent a turn to the Moss agent");
+            setState("idle");
+          } else {
+            addLog("Sent a turn to the Moss agent");
+            setState("listening");
+          }
+          return;
+        } catch (mossError) {
+          if (!mountedRef.current || turn !== turnRef.current || controller.signal.aborted) return;
+          const reason = mossError instanceof Error ? mossError.message : "Moss session is unavailable.";
+          const simpleReason = /\(([^)]+)\)/.exec(reason)?.[1] ?? "session_unavailable";
+          setMossStatus((current) => ({ ...current, online: false, checked: true, reason: simpleReason, message: "Moss agent is offline. Browser fallback is available." }));
+          setMessage("Moss agent became unavailable. Using browser fallback.");
+          addLog("Moss agent unavailable; switched to browser fallback");
+        }
+      }
       const response = await fetch("/api/voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -466,6 +572,7 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
         <span className="voice-fab-icon" aria-hidden="true">{state === "listening" ? "◉" : state === "thinking" ? "…" : state === "speaking" ? "⌁" : "✳"}</span>
         <span>{state === "idle" ? "Ask your closet" : stateCopy[state]}</span>
       </button>
+      <div ref={audioContainerRef} className="voice-audio-output" aria-hidden="true" />
       {sheetOpen && <>
       <button type="button" className="voice-sheet-backdrop" aria-label="Close voice assistant" onClick={() => setSheetOpen(false)} />
       <section className="voice-agent voice-sheet" role="dialog" aria-modal="true" aria-labelledby="voice-sheet-title">
@@ -474,7 +581,7 @@ export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, h
       <span className={`voice-state state-${state}`} role="status"><i />{stateCopy[state]}</span>
       <button type="button" className="voice-sheet-close" onClick={() => setSheetOpen(false)} aria-label="Close voice assistant">×</button>
     </div>
-    <div className={`moss-presence ${mossStatus.online ? "moss-online" : "moss-offline"}`} role="status"><i />{demoOffline ? "Demo voice cache · Moss offline" : mossStatus.online ? "Moss voice agent online" : "Moss voice agent offline · browser voice available"}{mossStatus.online && mossStatus.latencyMs !== null ? <span>Last turn {Math.round(mossStatus.latencyMs)} ms</span> : null}</div>
+    <div className={`moss-presence ${mossStatus.online ? "moss-online" : "moss-offline"}`} role="status" data-testid="voice-provider" data-provider={!mossStatus.checked ? "checking" : mossStatus.online ? "moss" : "browser-fallback"}><i />{demoOffline ? "Demo voice cache · Moss offline" : !mossStatus.checked ? "Checking Moss agent…" : mossStatus.online ? "Moss agent" : "Browser fallback"}{mossStatus.online && mossStatus.latencyMs !== null ? <span>Last turn {Math.round(mossStatus.latencyMs)} ms</span> : !mossStatus.online && mossStatus.checked && !demoOffline ? <span>{mossStatus.reason ?? "Moss service offline"}</span> : null}</div>
     <div className="voice-controls">
       {demoOffline ? <div className="demo-audio-controls"><span>PRE-RECORDED VOICE</span>{DEMO_UTTERANCES.map((line) => <button key={line.id} type="button" className="voice-button" disabled={!profileReady || state === "thinking" || state === "speaking" || state === "listening"} onClick={() => runDemoUtterance(line)}><span aria-hidden="true">▶</span> {line.transcript}</button>)}{(state === "thinking" || state === "speaking") && <button type="button" className="voice-button interrupt-button" onClick={() => runDemoUtterance(DEMO_UTTERANCES[1], true)}>Barge in with recorded audio</button>}</div> : state === "speaking" || state === "thinking" ? <button type="button" className="voice-button interrupt-button" onClick={() => listen(true)}>{state === "thinking" ? "Cancel & interrupt" : "Interrupt & speak"}</button> : <button type="button" className="voice-button" disabled={!profileReady || state === "listening"} onClick={() => listen()}>{!profileReady ? "Loading profile…" : state === "listening" ? "Listening…" : <><span aria-hidden="true">◉</span> Talk to your closet</>}</button>}
       <form onSubmit={(event) => { event.preventDefault(); const value = typed.trim(); if (value) { setTyped(""); void processTranscript(value); } }} className="voice-type-form"><label className="visually-hidden" htmlFor="voice-command">Type a command</label><input id="voice-command" value={typed} onChange={(event) => setTyped(event.target.value)} placeholder="Or type a command…" /><button type="submit" disabled={!typed.trim() || state === "thinking" || !profileReady}>Send</button></form>

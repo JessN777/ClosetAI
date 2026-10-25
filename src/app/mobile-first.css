@@ -193,6 +193,7 @@
 .bottom-nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent-strong); }
 
 .voice-widget { position: fixed; z-index: 40; right: 16px; bottom: calc(88px + env(safe-area-inset-bottom)); }
+.voice-audio-output { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .voice-fab { min-height: 52px !important; padding: 8px 16px; display: inline-flex; align-items: center; gap: 10px; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font-size: 14px !important; font-weight: 700; box-shadow: 0 8px 24px #143c2c38; }
 .voice-fab-icon { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; background: #ffffff26; font-size: 17px; }
 .voice-fab-listening, .voice-fab-speaking { background: var(--accent-strong); }

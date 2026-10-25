@@ -1,5 +1,6 @@
 moss-voice-agent-manager==1.0.0b14
-livekit-agents>=1.4,<2
+# moss-voice-agent-manager 1.0.0b14 pins LiveKit Agents 1.3.11.
+livekit-agents==1.3.11
 python-dotenv>=1.0,<2
 httpx>=0.27,<1
 fastapi>=0.115,<1

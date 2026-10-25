@@ -6,10 +6,20 @@ import importlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger("closetai.moss")
+
+
+class _SecretRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = moss_client.safe_error_message(record.getMessage())
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
 
 
 class MossClient:
@@ -24,13 +34,40 @@ class MossClient:
         return self._sdk
 
     def configured(self) -> bool:
-        return all(os.getenv(name) for name in ("MOSS_PROJECT_ID", "MOSS_PROJECT_KEY", "MOSS_VOICE_AGENT_ID"))
+        return not self.missing_configuration()
+
+    def missing_configuration(self) -> list[str]:
+        return [name for name in ("MOSS_PROJECT_ID", "MOSS_PROJECT_KEY", "MOSS_VOICE_AGENT_ID") if not os.getenv(name, "").strip()]
+
+    def install_log_redaction(self) -> None:
+        root = logging.getLogger()
+        filter_instance = next((item for item in root.filters if isinstance(item, _SecretRedactionFilter)), None)
+        if filter_instance is None:
+            filter_instance = _SecretRedactionFilter()
+            root.addFilter(filter_instance)
+        for handler in root.handlers:
+            if not any(isinstance(item, _SecretRedactionFilter) for item in handler.filters):
+                handler.addFilter(filter_instance)
+
+    @staticmethod
+    def safe_error_message(error: BaseException) -> str:
+        message = str(error) or type(error).__name__
+        for name in ("MOSS_PROJECT_KEY", "MOSS_PROJECT_ID", "MOSS_VOICE_AGENT_ID"):
+            secret = os.getenv(name, "").strip()
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        message = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1[redacted]", message)
+        message = re.sub(r"(?i)(moss[_-]?(?:project[_-]?key|api[_-]?key)\s*[:=]\s*)[^\s,;]+", r"\1[redacted]", message)
+        return message[:500]
 
     def deploy(self, prompt: str, function_tools: list[Callable[..., Any]]) -> Any:
         if not self.configured():
-            raise RuntimeError("Moss credentials are not configured for the Python service.")
+            missing = ", ".join(self.missing_configuration())
+            raise RuntimeError(f"Missing required Moss environment variables: {missing}.")
         sdk = self._load()
-        client_type = getattr(sdk, "MossVoiceClient")
+        client_type = getattr(sdk, "MossVoiceClient", None)
+        if client_type is None:
+            raise RuntimeError("The installed moss-voice-agent-manager package does not expose MossVoiceClient.")
         client = client_type()
         result = client.deploy(
             voice_agent_id=os.environ["MOSS_VOICE_AGENT_ID"],
@@ -41,14 +78,16 @@ class MossClient:
         status_file = Path(os.getenv("MOSS_DEPLOYMENT_STATUS_PATH", Path(__file__).with_name(".data") / "deployment.json"))
         status_file.parent.mkdir(parents=True, exist_ok=True)
         temp = status_file.with_suffix(".tmp")
-        temp.write_text(json.dumps({"deployed": True}), encoding="utf-8")
+        temp.write_text(json.dumps({"deployed": True, "agent_id_prefix": os.environ["MOSS_VOICE_AGENT_ID"][:8]}), encoding="utf-8")
         temp.replace(status_file)
         return result
 
     def create_session(self, *, userdata: dict[str, Any], function_tools: list[Callable[..., Any]]) -> Any:
         sdk = self._load()
         session_type = getattr(sdk, "MossAgentSession")
-        return session_type(userdata=userdata, function_tools=function_tools, max_tool_steps=8)
+        # This SDK version exposes tools on the LiveKit Agent, not on its
+        # MossAgentSession constructor. The adapter keeps the callsite stable.
+        return session_type(userdata=userdata, max_tool_steps=8)
 
     @staticmethod
     def _json_safe(value: Any) -> Any:

@@ -10,3 +10,7 @@ tests/.fixtures/
 __pycache__/
 *.py[cod]
 python-agent/.data/
+python-agent/.python-deps/
+python-agent/.health-deps/
+python-agent/.venv/
+python-agent/.venv314/
