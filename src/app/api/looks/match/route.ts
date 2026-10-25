@@ -7,6 +7,7 @@ import { matchProfileRequestSchema } from "@/lib/claude/schemas";
 import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@/lib/personal-session";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 const DEMO_CLOSET: ClosetItem[] = [{ id: "demo-navy-jacket", name: "Navy Weekend Jacket.png", category: "outerwear", color: "navy", silhouette: "relaxed", formality: "everyday", fit: "relaxed" }];
 
 export async function POST(request: Request) {
@@ -32,7 +33,8 @@ export async function POST(request: Request) {
     const attachCookie = (response: NextResponse) => withPersonalCookie(response, session.id, request);
     const normalizedLookName = normalizeLookName(parsed.data.lookName);
     const stored = await services.getProfile(redis, session.id, normalizedLookName);
-    if (!stored || services.now() - stored.storedAt >= 30 * 24 * 60 * 60 * 1000) {
+    const profileAge = stored ? services.now() - stored.storedAt : Number.POSITIVE_INFINITY;
+    if (!stored || !Number.isFinite(stored.storedAt) || profileAge < 0 || profileAge >= 30 * 24 * 60 * 60 * 1000) {
       return attachCookie(apiFailure(log, "PROFILE_NOT_FOUND", "Build a style profile for this look before matching your closet.", 404));
     }
     const storedProfile = lookProfileSchema.parse(stored.profile);

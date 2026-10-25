@@ -6,6 +6,7 @@ import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@
 import { z } from "zod";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 const profileRequestSchema = buildLookProfileInputSchema.extend({ force: z.boolean().optional() }).strict();
 
 export async function POST(request: Request) {
@@ -18,7 +19,10 @@ export async function POST(request: Request) {
     const services = getClaudeRouteServices();
 
     if (process.env.DEMO_OFFLINE === "1") {
-      const profile = await services.buildProfile(input);
+      if (normalizeLookName(input.lookName) !== "quiet luxury" || input.occasion) {
+        return apiFailure(log, "OFFLINE_LOOK_UNAVAILABLE", "Offline demo has a cached profile for Quiet luxury without an occasion filter.", 404);
+      }
+      const profile = await services.buildProfile({ lookName: "quiet luxury" });
       setRouteUsage(log, getClaudeUsage(profile));
       log.cache = "hit";
       return NextResponse.json({ profile, cached: true, storedAt: null });
@@ -32,11 +36,13 @@ export async function POST(request: Request) {
     const normalizedLookName = normalizeLookName(parsed.data.lookName);
     const existing = await services.getProfile(redis, session.id, normalizedLookName);
     const age = existing ? services.now() - existing.storedAt : Number.POSITIVE_INFINITY;
-    const fresh = existing && age >= 0 && age < 30 * 24 * 60 * 60 * 1000;
+    const fresh = existing && Number.isFinite(existing.storedAt) && age >= 0 && age < 30 * 24 * 60 * 60 * 1000;
     if (fresh && !parsed.data.force) {
-      const cachedProfile = lookProfileSchema.parse(existing.profile);
-      log.cache = "hit";
-      return attachCookie(NextResponse.json({ profile: cachedProfile, cached: true, storedAt: existing.storedAt }));
+      const cachedProfile = lookProfileSchema.safeParse(existing.profile);
+      if (cachedProfile.success) {
+        log.cache = "hit";
+        return attachCookie(NextResponse.json({ profile: cachedProfile.data, cached: true, storedAt: existing.storedAt }));
+      }
     }
     const limited = await enforceClaudeRateLimit(redis, session.id, log);
     if (limited) return attachCookie(limited);

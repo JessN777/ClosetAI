@@ -8,6 +8,7 @@ import { getPersonalSession, personalProfileSecret, withPersonalCookie } from "@
 import { DEMO_PREFERENCES } from "@/lib/demo-state";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 const DEMO_CLOSET: ClosetItem[] = [{ id: "demo-navy-jacket", name: "Navy Weekend Jacket.png" }];
 
 export async function POST(request: Request) {

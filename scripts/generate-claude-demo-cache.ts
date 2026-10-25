@@ -3,6 +3,7 @@ import path from "node:path";
 import { hashDemoInput } from "../src/lib/claude/canonical";
 import { closetSchema, lookProfileSchema, recommendOutfitInputSchema } from "../src/lib/claude/schemas";
 import { DEMO_RECOMMENDATION_INPUT } from "../src/lib/claude/demo-cache-inputs";
+import { DEMO_PREFERENCES } from "../src/lib/demo-state";
 
 const profile = lookProfileSchema.parse({
   lookName: "quiet luxury",
@@ -32,17 +33,19 @@ const profile = lookProfileSchema.parse({
 });
 
 const recommendationInput = recommendOutfitInputSchema.parse(DEMO_RECOMMENDATION_INPUT);
+const emptyFavoriteColorsInput = recommendOutfitInputSchema.parse({
+  ...DEMO_RECOMMENDATION_INPUT,
+  preferences: DEMO_PREFERENCES,
+});
 const demoCloset = closetSchema.parse([{ id: "demo-navy-jacket", name: "Navy Weekend Jacket.png", category: "outerwear", color: "navy", silhouette: "relaxed", formality: "everyday", fit: "relaxed" }]);
 
+const recommendationOutput = { options: [
+  { title: "Navy jacket, fine knit, and dark denim", closetItemIds: ["demo-navy-jacket"], reason: "Your relaxed navy jacket gives this everyday layer a clean, easy focal point.", missingPiece: { description: "Fine knit top", suggestedPurchase: "Add a cream or white fine knit to keep the outfit light and relaxed." } },
+  { title: "Soft tailoring for a cool day", closetItemIds: ["demo-navy-jacket"], reason: "The jacket adds a polished outer layer that works well in mild weather.", missingPiece: { description: "Straight-leg trousers", suggestedPurchase: "Pair it with relaxed charcoal or camel straight-leg trousers." } },
+] };
 const fixtures: Array<{ functionName: string; input: unknown; output: unknown }> = [
-  {
-    functionName: "recommendOutfit",
-    input: recommendationInput,
-    output: { options: [
-      { title: "Navy jacket, fine knit, and dark denim", closetItemIds: ["demo-navy-jacket"], reason: "Your relaxed navy jacket gives this everyday layer a clean, easy focal point.", missingPiece: { description: "Fine knit top", suggestedPurchase: "Add a cream or white fine knit to keep the outfit light and relaxed." } },
-      { title: "Soft tailoring for a cool day", closetItemIds: ["demo-navy-jacket"], reason: "The jacket adds a polished outer layer that works well in mild weather.", missingPiece: { description: "Straight-leg trousers", suggestedPurchase: "Pair it with relaxed charcoal or camel straight-leg trousers." } },
-    ] },
-  },
+  { functionName: "recommendOutfit", input: recommendationInput, output: recommendationOutput },
+  { functionName: "recommendOutfit", input: emptyFavoriteColorsInput, output: recommendationOutput },
   {
     functionName: "buildLookProfile",
     input: { lookName: "quiet luxury" },

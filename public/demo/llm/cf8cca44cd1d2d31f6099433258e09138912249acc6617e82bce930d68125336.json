@@ -1,0 +1,30 @@
+{
+  "functionName": "recommendOutfit",
+  "inputHash": "cf8cca44cd1d2d31f6099433258e09138912249acc6617e82bce930d68125336",
+  "output": {
+    "options": [
+      {
+        "title": "Navy jacket, fine knit, and dark denim",
+        "closetItemIds": [
+          "demo-navy-jacket"
+        ],
+        "reason": "Your relaxed navy jacket gives this everyday layer a clean, easy focal point.",
+        "missingPiece": {
+          "description": "Fine knit top",
+          "suggestedPurchase": "Add a cream or white fine knit to keep the outfit light and relaxed."
+        }
+      },
+      {
+        "title": "Soft tailoring for a cool day",
+        "closetItemIds": [
+          "demo-navy-jacket"
+        ],
+        "reason": "The jacket adds a polished outer layer that works well in mild weather.",
+        "missingPiece": {
+          "description": "Straight-leg trousers",
+          "suggestedPurchase": "Pair it with relaxed charcoal or camel straight-leg trousers."
+        }
+      }
+    ]
+  }
+}

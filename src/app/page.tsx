@@ -500,7 +500,7 @@ export default function Home() {
           </>}
         </section>}
 
-        <VoiceAgent garments={closet} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} demoOffline={demoOffline} activeTab={activeTab} onPreferencesChange={setFitPreferences} />
+        <VoiceAgent garments={closet} personPhoto={photo?.file ?? null} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} onNavigateToShop={() => setActiveTab("shop")} onNavigateToTryOn={() => navigate("tryon")} demoOffline={demoOffline} activeTab={activeTab} onPreferencesChange={setFitPreferences} />
       </div>
 
       <nav className="bottom-nav" aria-label="Main navigation">

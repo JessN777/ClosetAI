@@ -57,6 +57,14 @@ Type **“quiet luxury”** into the Dress like field, or click the prerecorded 
 
 For a reference image, use only an image you own or have rights to. The browser samples approximate colors locally and marks the profile low confidence; no image is sent to the LLM, server, or try-on model. The default behavior discards the uploaded file after extraction. **Keep a copy in this browser** explicitly saves it to IndexedDB, and **Delete saved browser copy** removes it.
 
+## Build this look · 45 seconds
+
+- **0:00–0:10 — Request it:** In Shop, open **Build this look** and click the prerecorded **“Dress like quiet luxury.”** voice line (or type **quiet luxury**). The voice tool fills the flow and reads the top matches; it does not start a render.
+- **0:10–0:20 — Check the profile:** Show the three progress labels, the **Cached** badge, low/medium confidence, and the two bundled public-text source links before the checklist appears. In offline mode, the profile, closet match, and shopping product card are bundled fixtures.
+- **0:20–0:32 — Select pieces:** Keep the navy jacket checked, add one shop gap such as the cream knit, and uncheck any other item so the selection has two pieces. The knit is unselected by default and shows a cached retailer, price tier, and listing link.
+- **0:32–0:45 — Try them together:** Click **Try on selected (2)**. Because the selection includes an upper and lower piece, the flow submits one combined garment image to the existing cached `/api/tryon` job, then shows the result in the comparison grid as **Combined look**. No purchase is started.
+- **Fallback:** If the voice line is missed, type **quiet luxury**. If product fixtures fail, the gap stays visible with **Product unavailable · price unavailable**. If no photo is loaded, use **Go to Try-on**, load the local demo photo, return to Build this look, and tap the selection button. If a style source is thin, choose one of the suggested aesthetics or add an event/year in the context field.
+
 ## Shop the look
 
 Type **“Quiet luxury”** and optionally **“everyday”** in the Shop the look fields, then click **Build shop list**. Or click the prerecorded **“Shop the quiet luxury look.”** line to invoke the `shop_the_look` voice tool. Offline mode returns four cached outfit pieces and cached listing cards: the seeded navy jacket is identified as a close closet match and skips product results, while missing pieces show an exact listing plus two lower price tiers. The cards use bundled local demo product images, include retailer labels/links, and have **Save to wishlist** buttons; the demo wishlist persists in local browser storage only.

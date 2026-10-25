@@ -4,11 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import type { ClosetGarment } from "@/lib/live-garment";
 import { DEMO_PRODUCTS, DEMO_PREFERENCES, DEMO_STATE_ID, DEMO_UTTERANCES } from "@/lib/demo-state";
 import DressLikePanel from "@/components/DressLikePanel";
+import BuildThisLookFlow from "@/components/BuildThisLookFlow";
 import type { StyleMatchLists, StyleProfile } from "@/lib/style-profile";
-import { fetchDressLike } from "@/lib/style-profile-client";
 import ShopTheLookPanel from "@/components/ShopTheLookPanel";
 import type { ShopLookPlan } from "@/lib/shop-types";
 import DataUsePanel from "@/components/DataUsePanel";
+import { addBuildLookSelection, requestBuildThisLook, type BuildLookVoiceContext } from "@/lib/build-look-events";
 
 type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 type SpeechResultEvent = Event & { results: { isFinal: boolean; 0: { transcript: string } }[]; resultIndex: number };
@@ -32,19 +33,22 @@ const emptyPreferences: Preferences = { favoriteColors: [], fit: [], occasions: 
 
 const stateCopy: Record<VoiceState, string> = { idle: "Ready when you are", listening: "Listening…", thinking: "Thinking…", speaking: "Speaking…" };
 
-export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSelectGarment, onTryOn, demoOffline = false, activeTab, onPreferencesChange }: {
+export default function VoiceAgent({ garments, personPhoto, selectedGarmentId, hasPhoto, onSelectGarment, onTryOn, onNavigateToShop, onNavigateToTryOn, demoOffline = false, activeTab, onPreferencesChange }: {
   garments: ClosetGarment[];
+  personPhoto: File | null;
   selectedGarmentId: string | null;
   hasPhoto: boolean;
   onSelectGarment: (id: string) => void;
   onTryOn: (garmentId?: string, turnSignal?: AbortSignal) => void;
+  onNavigateToShop: () => void;
+  onNavigateToTryOn: () => void;
   demoOffline?: boolean;
   activeTab: "closet" | "tryon" | "shop" | "share";
   onPreferencesChange?: (profile: Pick<Preferences, "favoriteColors" | "fit" | "sizes">) => void;
 }) {
   const [state, setState] = useState<VoiceState>("idle");
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [shopFeature, setShopFeature] = useState<"dress" | "shop">("dress");
+  const [shopFeature, setShopFeature] = useState<"build" | "dress" | "shop">("build");
   const [message, setMessage] = useState("");
   const [transcript, setTranscript] = useState("");
   const [responseText, setResponseText] = useState("");
@@ -59,6 +63,7 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   const [styleProfile, setStyleProfile] = useState<StyleProfile | null>(null);
   const [styleMatches, setStyleMatches] = useState<StyleMatchLists | null>(null);
   const [shopPlan, setShopPlan] = useState<ShopLookPlan | null>(null);
+  const [buildLookContext, setBuildLookContext] = useState<BuildLookVoiceContext | null>(null);
   const [mossStatus, setMossStatus] = useState<MossStatus>({ online: false, latencyMs: null, message: "Moss voice agent is offline. Browser voice is available." });
   const [supported, setSupported] = useState(true);
   const turnRef = useRef(0);
@@ -68,7 +73,9 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   const demoAudioRef = useRef<HTMLAudioElement | null>(null);
   const demoPlaybackRef = useRef(0);
   const stateRef = useRef(state);
+  const buildLookContextRef = useRef(buildLookContext);
   stateRef.current = state;
+  buildLookContextRef.current = buildLookContext;
 
   useEffect(() => { onPreferencesChange?.({ favoriteColors: preferences.favoriteColors, fit: preferences.fit, sizes: preferences.sizes }); }, [preferences, onPreferencesChange]);
 
@@ -165,6 +172,14 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
     if (call.name === "start_tryon") {
       const id = typeof args.garmentId === "string" ? args.garmentId : selectedGarmentId;
       const match = garments.find((item) => item.id === id);
+      const buildContext = buildLookContextRef.current;
+      if (buildContext?.selectionPending) {
+        const choice = buildContext.choices.find((item) => item.id === args.garmentId || item.closetItemId === args.garmentId);
+        if (choice) await addBuildLookSelection([choice.id]);
+        return choice
+          ? `I added ${choice.label} to the Build this look selection. Review it and tap Try on selected on screen to start.`
+          : "Review the Build this look selection and tap Try on selected on screen; I won't start that render by voice.";
+      }
       if (!hasPhoto) return "Add your full-body photo first and I can start a high-quality try-on.";
       if (!match) return "Choose a garment from your closet first and I can start the try-on.";
       onSelectGarment(match.id);
@@ -176,15 +191,29 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
       const lookName = typeof args.lookName === "string" ? args.lookName.trim().slice(0, 100) : "";
       if (!lookName) return "Tell me the look or style you want to emulate.";
       try {
-        const result = await fetchDressLike(lookName, garments.map(({ id, name }) => ({ id, name })), signal);
+        setShopFeature("build");
+        onNavigateToShop();
+        const reply = await requestBuildThisLook(lookName, signal);
         if (signal.aborted) return "That action was cancelled.";
-        setStyleProfile(result.profile);
-        setStyleMatches(result.matches);
-        addLog(`Built a ${result.cached ? "cached " : "sourced "}style profile for ${result.profile.lookName}`);
-        return result.summary || `${result.profile.lookName} is characterized by ${result.profile.silhouette.values.join(", ") || "uncertain silhouettes"} and ${result.profile.colorPalette.values.join(", ") || "a palette that needs more evidence"}. I found ${result.matches.ownedMatches.length} pieces you own, ${result.matches.closeMatches.length} close matches, and ${result.matches.gapsToShop.length} gaps to shop for.`;
+        addLog(`Built a sourced style profile for ${lookName}`);
+        return reply;
       } catch (cause) {
         return cause instanceof Error ? cause.message : "I couldn't build that style profile right now.";
       }
+    }
+    if (call.name === "select_look_pieces") {
+      const context = buildLookContextRef.current;
+      if (!context?.selectionPending) return "Build a look first, then I can add pieces to its on-screen selection.";
+      const requestedIds = Array.isArray(args.selectionIds) ? args.selectionIds.filter((id): id is string => typeof id === "string") : [];
+      const available = new Set(context.choices.map(({ id }) => id));
+      const validIds = requestedIds.filter((id) => available.has(id)).slice(0, 4);
+      if (!validIds.length) return "Choose from the pieces shown in Build this look.";
+      const addedIds = await addBuildLookSelection(validIds);
+      if (signal.aborted) return "That action was cancelled.";
+      const names = addedIds.map((id) => context.choices.find((choice) => choice.id === id)?.label).filter((name): name is string => Boolean(name));
+      if (!names.length) return "I couldn't update the checklist. Select a piece on screen instead.";
+      addLog(`Added ${names.length} piece${names.length === 1 ? "" : "s"} to the try-on selection`);
+      return `I added ${names.join(" and ")} to the selection. Please review it and tap Try on selected when you are ready; I have not started a try-on.`;
     }
     if (call.name === "shop_the_look") {
       const lookName = typeof args.lookName === "string" ? args.lookName.trim().slice(0, 100) : "";
@@ -269,7 +298,7 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
       const response = await fetch("/api/voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: normalized, closet: garments.map(({ id, name }) => ({ id, name })), preferences, history, styleNotes, ...(demoOffline ? { demoState: DEMO_STATE_ID } : {}) }),
+        body: JSON.stringify({ transcript: normalized, closet: garments.map(({ id, name }) => ({ id, name })), preferences, history, styleNotes, buildLookContext, ...(demoOffline ? { demoState: DEMO_STATE_ID } : {}) }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(14_000)]),
       });
       const payload = await response.json().catch(() => ({})) as { reply?: unknown; toolCalls?: unknown; error?: unknown };
@@ -307,6 +336,18 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   async function runLocalFallback(text: string, signal: AbortSignal): Promise<string | null> {
     if (signal.aborted) return null;
     const lower = text.toLowerCase();
+    const lookContext = buildLookContextRef.current;
+    if (lookContext?.selectionPending && /\b(try|add|select|choose|pick|first|second|third|all)\b/.test(lower)) {
+      const number = lower.includes("first") ? 1 : lower.includes("second") ? 2 : lower.includes("third") ? 3 : null;
+      const terms = lower.split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !["try", "add", "select", "choose", "pick", "first", "second", "third", "this", "piece", "pieces", "look"].includes(word));
+      const choices = lookContext.choices.filter((choice) => lower.includes("all") || (number !== null ? lookContext.choices.indexOf(choice) === number - 1 : terms.some((word) => choice.label.toLowerCase().includes(word))));
+      if (!choices.length) return `Your ${lookContext.lookName} pieces are ready. Say the name of a piece or “first” to add one to the selection.`;
+      if (signal.aborted) return null;
+      const added = await addBuildLookSelection(choices.slice(0, 4).map(({ id }) => id));
+      if (signal.aborted) return null;
+      const names = added.map((id) => lookContext.choices.find((choice) => choice.id === id)?.label).filter((name): name is string => Boolean(name));
+      if (names.length) { addLog(`Added ${names.length} piece${names.length === 1 ? "" : "s"} to the try-on selection`); return `I added ${names.join(" and ")} to your selection. Review it and tap Try on selected when you're ready. I have not started a render.`; }
+    }
     if (lower.includes("closet") || lower.includes("what do i have")) {
       const names = garments.map((item) => item.name);
       addLog("Checked your session closet");
@@ -403,15 +444,22 @@ export default function VoiceAgent({ garments, selectedGarmentId, hasPhoto, onSe
   }
 
   return <>
-    {activeTab === "shop" && <section className="shop-workspace" aria-label="Style and shopping tools">
+    <section className="shop-workspace" aria-label="Style and shopping tools" hidden={activeTab !== "shop"}>
       <div className="shop-feature-tabs" role="tablist" aria-label="Shop features">
-        <button type="button" role="tab" aria-selected={shopFeature === "dress"} onClick={() => setShopFeature("dress")}>Dress like</button>
+        <button type="button" role="tab" aria-selected={shopFeature === "build"} onClick={() => setShopFeature("build")}>Build this look</button>
+        <button type="button" role="tab" aria-selected={shopFeature === "dress"} onClick={() => setShopFeature("dress")}>Style profile</button>
         <button type="button" role="tab" aria-selected={shopFeature === "shop"} onClick={() => setShopFeature("shop")}>Shop the look</button>
       </div>
-      {!styleProfile && shopFeature === "dress" && <p className="shop-empty-hint">Start with a name or style to build your first profile.</p>}
-      {!shopPlan && shopFeature === "shop" && <p className="shop-empty-hint">Enter a look or event to find the outfit pieces and retailer listings.</p>}
-      {shopFeature === "dress" ? <DressLikePanel garments={garments} hasPhoto={hasPhoto} onSelectGarment={onSelectGarment} onTryOn={onTryOn} profile={styleProfile} matches={styleMatches} onProfile={(profile, matches) => { setStyleProfile(profile); setStyleMatches(matches); }} /> : <ShopTheLookPanel garments={garments} demoOffline={demoOffline} plan={shopPlan} onPlan={setShopPlan} />}
-    </section>}
+      <div role="tabpanel" hidden={shopFeature !== "build"}><BuildThisLookFlow garments={garments} personPhoto={personPhoto} demoOffline={demoOffline} onNavigateTryOn={onNavigateToTryOn} onVoiceContextChange={setBuildLookContext} /></div>
+      <div role="tabpanel" hidden={shopFeature !== "dress"}>
+        {!styleProfile && <p className="shop-empty-hint">Start with a name or style to build your first profile.</p>}
+        <DressLikePanel garments={garments} hasPhoto={hasPhoto} onSelectGarment={onSelectGarment} onTryOn={onTryOn} profile={styleProfile} matches={styleMatches} onProfile={(profile, matches) => { setStyleProfile(profile); setStyleMatches(matches); }} />
+      </div>
+      <div role="tabpanel" hidden={shopFeature !== "shop"}>
+        {!shopPlan && <p className="shop-empty-hint">Enter a look or event to find the outfit pieces and retailer listings.</p>}
+        {activeTab === "shop" && shopFeature === "shop" && <ShopTheLookPanel garments={garments} demoOffline={demoOffline} plan={shopPlan} onPlan={setShopPlan} />}
+      </div>
+    </section>
     {activeTab === "closet" && <DataUsePanel demoOffline={demoOffline} onPreferencesDeleted={() => { setPreferences(emptyPreferences); setStyleProfile(null); setStyleMatches(null); addLog("Deleted saved preferences"); }} />}
     <div className="voice-widget" aria-label="Closet voice assistant">
       <button type="button" className={`voice-fab voice-fab-${state}`} onClick={() => setSheetOpen(true)} aria-expanded={sheetOpen} aria-haspopup="dialog">

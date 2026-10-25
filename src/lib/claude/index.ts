@@ -42,10 +42,11 @@ function rememberUsage<T extends object>(result: T, usage: ClaudeUsage): T { usa
 export function getClaudeModel() { return process.env.CLAUDE_MODEL?.trim() || "claude-sonnet-5-5"; }
 
 const SYSTEM_PROMPT = "You are a careful personal styling assistant. Return only JSON matching the supplied JSON schema. Say when you are unsure by lowering confidence and explaining why. Use only the user's closet item IDs when selecting owned clothes. Never invent closet items. Describe clothing and style only; do not identify anyone from a photo and do not use facial features. The application does not send photos to this decision layer.";
+const RESEARCH_SYSTEM_PROMPT = "You are a careful clothing and style researcher. Use the web search tool to find public text descriptions, summarize the relevant clothing evidence, and give source titles and URLs. Describe clothing and style only; do not identify anyone, discuss facial features, or use photos.";
 
 const recommendJsonSchema = {
   type: "object", additionalProperties: false, required: ["options"], properties: {
-    options: { type: "array", minItems: 2, maxItems: 3, items: { type: "object", additionalProperties: false, required: ["title", "closetItemIds", "reason", "missingPiece"], properties: {
+    options: { type: "array", items: { type: "object", additionalProperties: false, required: ["title", "closetItemIds", "reason", "missingPiece"], properties: {
       title: { type: "string" }, closetItemIds: { type: "array", minItems: 1, items: { type: "string" } }, reason: { type: "string" },
       missingPiece: { anyOf: [{ type: "object", additionalProperties: false, required: ["description", "suggestedPurchase"], properties: { description: { type: "string" }, suggestedPurchase: { type: "string" } } }, { type: "null" }] },
     } } },
@@ -73,20 +74,20 @@ const profileJsonSchema = {
 
 function scoreJsonSchema() {
   return { type: "object", additionalProperties: false, required: ["category", "color", "silhouette", "formality"], properties: {
-    category: { type: "integer", minimum: 0, maximum: 100 }, color: { type: "integer", minimum: 0, maximum: 100 },
-    silhouette: { type: "integer", minimum: 0, maximum: 100 }, formality: { type: "integer", minimum: 0, maximum: 100 },
+    category: { type: "integer" }, color: { type: "integer" },
+    silhouette: { type: "integer" }, formality: { type: "integer" },
   } };
 }
 const matchesJsonSchema = {
   type: "object", additionalProperties: false, required: ["ownedMatches", "closeMatches", "gaps"], properties: {
     ownedMatches: { type: "array", items: { type: "object", additionalProperties: false, required: ["itemId", "targetPiece", "score", "scoreBreakdown", "reasons"], properties: {
-      itemId: { type: "string" }, targetPiece: { type: "string" }, score: { type: "integer", minimum: 0, maximum: 100 }, scoreBreakdown: scoreJsonSchema(), reasons: { type: "array", items: { type: "string" } },
+      itemId: { type: "string" }, targetPiece: { type: "string" }, score: { type: "integer" }, scoreBreakdown: scoreJsonSchema(), reasons: { type: "array", items: { type: "string" } },
     } } },
     closeMatches: { type: "array", items: { type: "object", additionalProperties: false, required: ["itemId", "targetPiece", "score", "scoreBreakdown", "reasons", "suggestedTweak"], properties: {
-      itemId: { type: "string" }, targetPiece: { type: "string" }, score: { type: "integer", minimum: 0, maximum: 100 }, scoreBreakdown: scoreJsonSchema(), reasons: { type: "array", items: { type: "string" } }, suggestedTweak: { type: "string" },
+      itemId: { type: "string" }, targetPiece: { type: "string" }, score: { type: "integer" }, scoreBreakdown: scoreJsonSchema(), reasons: { type: "array", items: { type: "string" } }, suggestedTweak: { type: "string" },
     } } },
     gaps: { type: "array", items: { type: "object", additionalProperties: false, required: ["itemDescription", "impact", "impactScore", "reason"], properties: {
-      itemDescription: { type: "string" }, impact: { type: "string", enum: ["high", "medium", "low"] }, impactScore: { type: "integer", minimum: 0, maximum: 100 }, reason: { type: "string" },
+      itemDescription: { type: "string" }, impact: { type: "string", enum: ["high", "medium", "low"] }, impactScore: { type: "integer" }, reason: { type: "string" },
     } } },
   },
 } as const;
@@ -165,12 +166,17 @@ async function postMessage(body: Record<string, unknown>, deadline: number): Pro
 
 async function callStructured<T>(args: {
   functionName: string; input: unknown; schema: { parse: (value: unknown) => T }; jsonSchema: unknown;
-  maxTokens?: number; webSearch?: boolean; validate?: (value: T, response: ClaudeResponse) => T;
+  maxTokens?: number; deadline?: number; validate?: (value: T, response: ClaudeResponse) => T;
 }): Promise<{ value: T; usage: ClaudeUsage }> {
   const model = getClaudeModel();
-  const deadline = Date.now() + 55_000;
+  const deadline = args.deadline ?? Date.now() + 55_000;
   const userInput = canonicalJson(args.input);
-  let messages: Array<{ role: "user" | "assistant"; content: unknown }> = [{ role: "user", content: "Function: " + args.functionName + "\nInput JSON:\n" + userInput + "\n\nFollow the system prompt and return only the requested JSON." }];
+  const instructions: Record<string, string> = {
+    recommendOutfit: "Return two or three distinct outfit options for the occasion and weather. Use only IDs present in the closet input. Explain each choice in one sentence, and add a missing piece with a purchase suggestion when useful.",
+    buildLookProfile: "Use only the provided public web-search research and source list. Include at least two source URLs from that list in the JSON. Compare sources; if evidence is thin or sources conflict, say so and mark affected fields low confidence. Describe clothing and style only.",
+    matchProfileToCloset: "Compare each profile key piece to the closet across category, color, silhouette, and formality. Provide numeric dimension scores and clear reasons. Use only closet item IDs. Put closet matches in descending score order and gaps in descending impact order.",
+  };
+  let messages: Array<{ role: "user" | "assistant"; content: unknown }> = [{ role: "user", content: "Function: " + args.functionName + "\nTask instructions: " + instructions[args.functionName] + "\nInput JSON:\n" + userInput + "\n\nReturn only JSON matching the required schema." }];
   let validationFailure: unknown = new Error("No validation failure.");
   let inputTokens = 0;
   let outputTokens = 0;
@@ -186,29 +192,26 @@ async function callStructured<T>(args: {
     }
     const callMessages = messages.slice();
     let response: ClaudeResponse = {};
+    const turnContent: unknown[] = [];
     let complete = false;
     for (let continuation = 0; continuation < 4; continuation += 1) {
       response = await postMessage({
         model, max_tokens: args.maxTokens ?? 2200, system: SYSTEM_PROMPT, messages: callMessages,
         output_config: { format: { type: "json_schema", schema: args.jsonSchema } },
-        ...(args.webSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }] } : {}),
       }, deadline);
       inputTokens += Number(response.usage?.input_tokens || 0);
       outputTokens += Number(response.usage?.output_tokens || 0);
+      turnContent.push(...(response.content ?? []));
       if (response.stop_reason !== "pause_turn") { complete = true; break; }
       callMessages.push({ role: "assistant", content: response.content ?? [] });
     }
     if (!complete) throw new ClaudeDecisionError("API_ERROR", "Claude could not finish the styling request.");
     lastResponse = response;
-    previousAssistant = response.content ?? [];
-    if (args.webSearch && !previousAssistant.some((block) => !!block && typeof block === "object" && (block as { type?: string }).type === "server_tool_use" && (block as { name?: string }).name === "web_search")) {
-      validationFailure = new Error("Web search did not run. Search for current clothing and style descriptions before writing the profile.");
-      if (validationAttempt === 1) throw new ClaudeDecisionError("INSUFFICIENT_SOURCES", "At least two web sources are required to build this style profile.", { inputTokens, outputTokens, model });
-      continue;
-    }
+    previousAssistant = turnContent;
+    const aggregateResponse: ClaudeResponse = { ...response, content: turnContent };
     try {
       const parsed = args.schema.parse(extractJson(collectText(response)));
-      const value = args.validate ? args.validate(parsed, response) : parsed;
+      const value = args.validate ? args.validate(parsed, aggregateResponse) : parsed;
       return { value, usage: { inputTokens, outputTokens, model, cached: false } };
     } catch (error) {
       if (validationAttempt === 1) {
@@ -219,6 +222,48 @@ async function callStructured<T>(args: {
     }
   }
   throw new ClaudeDecisionError("INVALID_RESPONSE", "Claude returned an answer that did not match the required styling format.");
+}
+
+async function searchStyleSources(input: BuildLookProfileInput, deadline: number): Promise<{ sources: Source[]; research: string; usage: ClaudeUsage }> {
+  const model = getClaudeModel();
+  const occasion = input.occasion ? " Occasion: " + input.occasion + "." : "";
+  const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [{
+    role: "user",
+    content: "Use web search to research public text descriptions of the clothing style called " + JSON.stringify(input.lookName) + "." + occasion +
+      " Focus only on garments, silhouette, fit, colors, layering, footwear, accessories, and occasions. Do not identify a person, discuss facial features, or use photos. Find at least two useful sources and summarize the clothing evidence with source titles and URLs.",
+  }];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let lastReason = "At least two web sources are required to build this style profile.";
+  for (let searchAttempt = 0; searchAttempt < 2; searchAttempt += 1) {
+    const callMessages = messages.slice();
+    const attemptContent: unknown[] = [];
+    let complete = false;
+    let response: ClaudeResponse = {};
+    for (let continuation = 0; continuation < 4; continuation += 1) {
+      response = await postMessage({
+        model, max_tokens: 1800, system: RESEARCH_SYSTEM_PROMPT, messages: callMessages,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+      }, deadline);
+      inputTokens += Number(response.usage?.input_tokens || 0);
+      outputTokens += Number(response.usage?.output_tokens || 0);
+      attemptContent.push(...(response.content ?? []));
+      if (response.stop_reason !== "pause_turn") { complete = true; break; }
+      callMessages.push({ role: "assistant", content: response.content ?? [] });
+    }
+    if (!complete) throw new ClaudeDecisionError("API_ERROR", "Claude could not finish researching this look.", { inputTokens, outputTokens, model });
+    const aggregate: ClaudeResponse = { ...response, content: attemptContent };
+    const usedSearch = attemptContent.some((block) => !!block && typeof block === "object" && (block as { type?: string }).type === "server_tool_use" && (block as { name?: string }).name === "web_search");
+    const sources = collectSearchSources(aggregate);
+    const research = collectText(aggregate).trim().slice(0, 14_000);
+    if (usedSearch && sources.length >= 2 && research) return { sources, research, usage: { inputTokens, outputTokens, model, cached: false } };
+    lastReason = !usedSearch ? "The previous response did not use web search." : sources.length < 2 ? "The previous search returned fewer than two usable source pages." : "The previous search returned no usable clothing descriptions.";
+    if (searchAttempt === 0) {
+      messages.push({ role: "assistant", content: attemptContent });
+      messages.push({ role: "user", content: "Your previous research was insufficient: " + lastReason + " Use web search again and return at least two source pages with clothing-only evidence." });
+    }
+  }
+  throw new ClaudeDecisionError("INSUFFICIENT_SOURCES", lastReason, { inputTokens, outputTokens, model });
 }
 
 async function readDemoCache<T>(functionName: string, input: unknown, schema: { parse: (value: unknown) => T }): Promise<T> {
@@ -268,19 +313,37 @@ export async function buildLookProfile(input: BuildLookProfileInput): Promise<Lo
     const result = await readDemoCache("buildLookProfile", parsedInput, lookProfileSchema);
     return rememberUsage(result, { inputTokens: 0, outputTokens: 0, model: getClaudeModel(), cached: true });
   }
-  const result = await callStructured({
-    functionName: "buildLookProfile", input: parsedInput, schema: rawLookProfileSchema, jsonSchema: profileJsonSchema,
-    maxTokens: 3200, webSearch: true,
-    validate: (raw, response) => {
-      const results = collectSearchSources(response);
-      const searched = new Map(results.map((source) => [source.url, source]));
-      const modelSources = Array.from(new Map(raw.sources.filter((source) => searched.has(source.url)).map((source) => [source.url, searched.get(source.url)!])).values());
-      const sources = modelSources.length >= 2 ? modelSources : results;
-      if (sources.length < 2) throw new ClaudeDecisionError("INSUFFICIENT_SOURCES", "At least two web sources are required to build this style profile.");
-      return lookProfileSchema.parse({ ...raw, sources: sources.slice(0, 12) });
-    },
+  const deadline = Date.now() + 55_000;
+  const searched = await searchStyleSources(parsedInput, deadline);
+  let result: { value: LookProfile; usage: ClaudeUsage };
+  try {
+    result = await callStructured({
+      functionName: "buildLookProfile",
+      input: { ...parsedInput, research: searched.research, sources: searched.sources },
+      schema: rawLookProfileSchema, jsonSchema: profileJsonSchema, maxTokens: 3200, deadline,
+      validate: (raw) => {
+        const available = new Map(searched.sources.map((source) => [source.url, source]));
+        const cited = Array.from(new Map(raw.sources.filter((source) => available.has(source.url)).map((source) => [source.url, available.get(source.url)!])).values());
+        if (cited.length < 2) throw new ClaudeDecisionError("INSUFFICIENT_SOURCES", "At least two web sources are required to build this style profile.");
+        return lookProfileSchema.parse({ ...raw, sources: cited.slice(0, 12) });
+      },
+    });
+  } catch (error) {
+    if (error instanceof ClaudeDecisionError) {
+      const prior = error.usage ?? { inputTokens: 0, outputTokens: 0, model: searched.usage.model };
+      throw new ClaudeDecisionError(error.code, error.message, {
+        inputTokens: searched.usage.inputTokens + prior.inputTokens,
+        outputTokens: searched.usage.outputTokens + prior.outputTokens,
+        model: prior.model,
+      });
+    }
+    throw error;
+  }
+  return rememberUsage(result.value, {
+    inputTokens: searched.usage.inputTokens + result.usage.inputTokens,
+    outputTokens: searched.usage.outputTokens + result.usage.outputTokens,
+    model: result.usage.model, cached: false,
   });
-  return rememberUsage(result.value, result.usage);
 }
 
 export async function matchProfileToCloset(profile: LookProfile, closet: ClosetItem[]): Promise<ProfileClosetMatches> {
