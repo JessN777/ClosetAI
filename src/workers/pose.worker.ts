@@ -6,6 +6,18 @@ const scope = self as unknown as {
   postMessage: (message: PoseResponse) => void;
 };
 let landmarker: PoseLandmarker | null = null;
+let firstFrame = true;
+
+function hardwareWebGLAvailable() {
+  const canvas = new OffscreenCanvas(1, 1);
+  const gl = canvas.getContext("webgl2");
+  if (!gl) return false;
+  const debug = gl.getExtension("WEBGL_debug_renderer_info");
+  const renderer = debug ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)) : "";
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
+  // Software WebGL can compile shaders for seconds and is slower than WASM CPU inference.
+  return !!debug && !/swiftshader|llvmpipe|software|basic render/i.test(renderer);
+}
 
 scope.onmessage = async ({ data }) => {
   if (data.type === "init") {
@@ -24,25 +36,27 @@ scope.onmessage = async ({ data }) => {
         minTrackingConfidence: 0.6,
         outputSegmentationMasks: false,
       });
-      let delegate: "GPU" | "CPU" = "GPU";
-      try { landmarker = await create("GPU"); }
+      let delegate: "GPU" | "CPU" = data.delegate === "CPU" ? "CPU" : hardwareWebGLAvailable() ? "GPU" : "CPU";
+      try { landmarker = await create(delegate); }
       catch { delegate = "CPU"; landmarker = await create("CPU"); }
       scope.postMessage({ type: "ready", delegate });
-    } catch (error) {
-      if (process.env.NODE_ENV !== "production") console.error("Pose initialization failed:", error);
+      if (process.env.NODE_ENV !== "production") console.info("Pose ready:", delegate);
+    } catch {
       scope.postMessage({ type: "error", message: "Pose tracking could not load. Check your connection and try the camera again." });
     }
     return;
   }
 
   try {
+    if (firstFrame && process.env.NODE_ENV !== "production") console.info("Pose first frame received");
     if (!landmarker) throw new Error("Tracking is not ready.");
     const started = performance.now();
     const result = landmarker.detectForVideo(data.bitmap, data.timestamp);
+    if (firstFrame && process.env.NODE_ENV !== "production") console.info("Pose first frame detected");
+    firstFrame = false;
     scope.postMessage({ type: "pose", landmarks: result.landmarks[0] ?? [], timestamp: data.timestamp, inferenceMs: performance.now() - started });
     result.close();
-  } catch (error) {
-    if (process.env.NODE_ENV !== "production") console.error("Pose detection failed:", error);
+  } catch {
     scope.postMessage({ type: "error", message: "Pose tracking stopped. Restart the camera or use photo upload." });
   } finally {
     data.bitmap.close();

@@ -1,11 +1,20 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState, type ReactNode } from "react";
 import LiveTryOn from "@/components/LiveTryOn";
+import VoiceAgent from "@/components/VoiceAgent";
+import ShareComposer from "@/components/ShareComposer";
+import PersonPhotoStep from "@/components/PersonPhotoStep";
+import GarmentBackgroundReview from "@/components/GarmentBackgroundReview";
+import TryOnProgress, { type TryOnStage } from "@/components/TryOnProgress";
+import TryOnResult, { type TryOnResultRecord } from "@/components/TryOnResult";
 import type { ClosetGarment } from "@/lib/live-garment";
+import { RunEpoch } from "@/lib/run-epoch";
 
 type UploadKind = "photo" | "garment";
+type AppTab = "closet" | "tryon" | "shop" | "share";
 type Upload = { url: string; name: string; file: File };
+type FitPreferences = { favoriteColors: string[]; fit: string[]; sizes: Record<string, string> };
 
 function UploadIcon({ className = "" }: { className?: string }) {
   return (
@@ -21,6 +30,16 @@ function CheckIcon() {
 
 function SparkleIcon({ className = "" }: { className?: string }) {
   return <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2.8c.6 4.7 3 7.1 7.7 7.7-4.7.6-7.1 3-7.7 7.7-.6-4.7-3-7.1-7.7-7.7 4.7-.6 7.1-3 7.7-7.7Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/><path d="M19 15.5c.3 2.1 1.4 3.2 3.5 3.5-2.1.3-3.2 1.4-3.5 3.5-.3-2.1-1.4-3.2-3.5-3.5 2.1-.3 3.2-1.4 3.5-3.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/></svg>;
+}
+
+function TabIcon({ tab }: { tab: AppTab }) {
+  const paths: Record<AppTab, ReactNode> = {
+    closet: <><path d="M4 8.5 12 4l8 4.5v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5Z"/><path d="M9 20v-6a3 3 0 0 1 6 0v6M4 9l8 4 8-4"/></>,
+    tryon: <><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></>,
+    shop: <><path d="M4 9h16l-1.2 10H5.2L4 9Z"/><path d="M8 9a4 4 0 0 1 8 0M9 13v2M15 13v2"/></>,
+    share: <><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5m-7.6 7.9 7.6 4.5"/></>,
+  };
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[tab]}</svg>;
 }
 
 function ImageUpload({
@@ -97,24 +116,82 @@ function ImageUpload({
 
 export default function Home() {
   const requestController = useRef<AbortController | null>(null);
+  const runEpochRef = useRef(new RunEpoch());
   const closetRef = useRef<ClosetGarment[]>([]);
+  const garmentRef = useRef<ClosetGarment | null>(null);
   const [mode, setMode] = useState<"photo" | "live">("photo");
+  const [activeTab, setActiveTab] = useState<AppTab>("closet");
   const [closet, setCloset] = useState<ClosetGarment[]>([]);
   const [photo, setPhoto] = useState<Upload | null>(null);
   const [garment, setGarment] = useState<ClosetGarment | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "result" | "error">("idle");
   const [message, setMessage] = useState("");
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [resultCached, setResultCached] = useState(false);
+  const [demoOffline, setDemoOffline] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareActionId, setShareActionId] = useState<string | null>(null);
+  const [guidedStep, setGuidedStep] = useState<1 | 2>(1);
+  const [preparedGarmentIds, setPreparedGarmentIds] = useState<Set<string>>(() => new Set());
+  const [progressStage, setProgressStage] = useState<TryOnStage>("preparing");
+  const [tryOnStartedAt, setTryOnStartedAt] = useState(0);
+  const [averageDurationMs, setAverageDurationMs] = useState(38_000);
+  const [recentResults, setRecentResults] = useState<TryOnResultRecord[]>([]);
+  const [currentResult, setCurrentResult] = useState<TryOnResultRecord | null>(null);
+  const [fitPreferences, setFitPreferences] = useState<FitPreferences>({ favoriteColors: [], fit: [], sizes: {} });
 
   useEffect(() => () => {
     if (photo) URL.revokeObjectURL(photo.url);
   }, [photo]);
   useEffect(() => { closetRef.current = closet; }, [closet]);
+  useEffect(() => { garmentRef.current = garment; }, [garment]);
   useEffect(() => () => closetRef.current.forEach((item) => URL.revokeObjectURL(item.url)), []);
 
   useEffect(() => () => requestController.current?.abort(), []);
 
+  useEffect(() => {
+    try {
+      const durations = JSON.parse(localStorage.getItem("closetai:tryon-duration-history:v1") || "[]") as number[];
+      const valid = durations.filter((value) => Number.isFinite(value) && value > 0).slice(-5);
+      if (valid.length) setAverageDurationMs(Math.round(valid.reduce((sum, value) => sum + value, 0) / valid.length));
+    } catch { /* Use the default time estimate when the local history is unavailable. */ }
+
+    const offline = document.documentElement.dataset.demoOffline === "true";
+    if (offline) {
+      try {
+        const saved = JSON.parse(localStorage.getItem("closetai:demo:preferences:v1") || "null") as Partial<FitPreferences> | null;
+        setFitPreferences({ favoriteColors: saved?.favoriteColors ?? ["navy"], fit: saved?.fit ?? ["relaxed"], sizes: saved?.sizes ?? { top: "M" } });
+      } catch { setFitPreferences({ favoriteColors: ["navy"], fit: ["relaxed"], sizes: { top: "M" } }); }
+      return;
+    }
+    let active = true;
+    void fetch("/api/preferences", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<Partial<FitPreferences>> : null).then((profile) => {
+      if (active && profile) setFitPreferences({ favoriteColors: profile.favoriteColors ?? [], fit: profile.fit ?? [], sizes: profile.sizes ?? {} });
+    }).catch(() => { if (active) console.error(JSON.stringify({ event: "tryon_fit_preferences_unavailable" })); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const offline = document.documentElement.dataset.demoOffline === "true";
+    setDemoOffline(offline);
+    if (!offline) return;
+    let active = true;
+    void Promise.all([fetch("/demo/person.png").then((response) => response.blob()), fetch("/demo/navy-jacket.png").then((response) => response.blob())]).then(([personBlob, garmentBlob]) => {
+      if (!active) return;
+      const personFile = new File([personBlob], "Demo full-body photo.png", { type: "image/png" });
+      const garmentFile = new File([garmentBlob], "Navy Weekend Jacket.png", { type: "image/png" });
+      const item: ClosetGarment = { id: "demo-navy-jacket", name: garmentFile.name, file: garmentFile, url: URL.createObjectURL(garmentFile) };
+      setPhoto({ file: personFile, name: personFile.name, url: URL.createObjectURL(personFile) });
+      setCloset([item]);
+      setGarment(item);
+      garmentRef.current = item;
+      setMessage("Offline demo wardrobe loaded from local files.");
+    }).catch(() => { if (active) { console.error(JSON.stringify({ event: "demo_asset_load_failed" })); setMessage("Offline demo assets could not be loaded. Upload images to continue."); } });
+    return () => { active = false; };
+  }, []);
+
   function cancelPendingRequest() {
+    runEpochRef.current.invalidate();
     requestController.current?.abort();
     requestController.current = null;
   }
@@ -134,6 +211,10 @@ export default function Home() {
     setMessage("");
     setStatus("idle");
     setResultUrl(null);
+    setResultCached(false);
+    setCurrentResult(null);
+    setShareUrl(null);
+    setShareActionId(null);
   }
 
   function addGarment(file: File) {
@@ -143,11 +224,16 @@ export default function Home() {
     const item: ClosetGarment = { id: crypto.randomUUID(), url: URL.createObjectURL(file), name: file.name, file };
     setCloset((items) => [...items, item]);
     setGarment(item);
+    garmentRef.current = item;
+    if (activeTab === "tryon") setGuidedStep(2);
   }
 
   function selectGarment(id: string) {
     clearResult();
-    setGarment(closet.find((item) => item.id === id) ?? null);
+    const next = closet.find((item) => item.id === id) ?? null;
+    garmentRef.current = next;
+    setGarment(next);
+    if (activeTab === "tryon") setGuidedStep(2);
   }
 
   function removeClosetGarment(id: string) {
@@ -155,7 +241,8 @@ export default function Home() {
     const removed = closet.find((item) => item.id === id);
     if (removed) URL.revokeObjectURL(removed.url);
     setCloset((items) => items.filter((item) => item.id !== id));
-    if (garment?.id === id) setGarment(null);
+    setPreparedGarmentIds((ids) => { const next = new Set(ids); next.delete(id); return next; });
+    if (garment?.id === id) { garmentRef.current = null; setGarment(null); }
   }
 
   function setUpload(kind: UploadKind, event: ChangeEvent<HTMLInputElement>) {
@@ -166,44 +253,123 @@ export default function Home() {
     if (!validateUpload(file)) return;
     clearResult();
     setPhoto({ url: URL.createObjectURL(file), name: file.name, file });
+    setGuidedStep(1);
   }
 
   function removeUpload(kind: UploadKind) {
     clearResult();
     if (kind === "photo") setPhoto(null);
-    else setGarment(null);
+    else { garmentRef.current = null; setGarment(null); }
   }
 
-  const ready = Boolean(photo && garment);
-
-  function handleTryOn(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (photo && garment) void generateLook(photo.file, garment.file);
+  function acceptGarmentBackground(processed: File | null) {
+    if (!garmentRef.current) return;
+    let accepted = garmentRef.current;
+    if (processed) {
+      const nextUrl = URL.createObjectURL(processed);
+      URL.revokeObjectURL(accepted.url);
+      accepted = { ...accepted, file: processed, url: nextUrl };
+      setCloset((items) => items.map((item) => item.id === accepted.id ? accepted : item));
+      setGarment(accepted);
+      garmentRef.current = accepted;
+    }
+    setPreparedGarmentIds((ids) => new Set(ids).add(accepted.id));
   }
 
-  async function generateLook(personFile: File, garmentFile: File) {
+  function buildWhyFits(garmentName: string) {
+    const name = garmentName.toLowerCase();
+    const palette = ["navy", "black", "white", "blue", "green", "red", "cream", "beige", "brown", "grey", "gray", "pink"].find((color) => name.includes(color));
+    const preferredColor = palette && fitPreferences.favoriteColors.some((color) => color.toLowerCase() === palette) ? palette : null;
+    const preferredFit = fitPreferences.fit[0]?.toLowerCase();
+    const reasons = [preferredColor ? `matches your ${preferredColor} palette` : palette ? `brings in ${palette} from your closet` : null, preferredFit ? `pairs with your ${preferredFit} fit preference` : null].filter(Boolean);
+    return reasons.length ? `${reasons[0]}${reasons.length > 1 ? ` and ${reasons[1]}` : ""}.` : `You chose ${garmentName} from your closet, so this look builds on a piece you already own.`;
+  }
+
+  const ready = Boolean(photo && garment && preparedGarmentIds.has(garment.id));
+
+  function startVoiceTryOn(garmentId?: string, turnSignal?: AbortSignal) {
+    if (turnSignal?.aborted) return;
+    const target = garmentId ? closetRef.current.find((item) => item.id === garmentId) : garmentRef.current;
+    if (photo && target) {
+      if (turnSignal?.aborted) return;
+      setActiveTab("tryon");
+      setGuidedStep(2);
+      garmentRef.current = target;
+      if (target.id !== garment?.id) setGarment(target);
+      void generateLook(photo.file, target.file, target.id, turnSignal);
+    }
+  }
+
+  async function generateLook(personFile: File, garmentFile: File, garmentId: string, turnSignal?: AbortSignal, sizeHint?: string) {
     if (requestController.current) return;
+    if (turnSignal?.aborted) return;
 
+    const runId = runEpochRef.current.begin();
+    const isCurrentRun = () => runEpochRef.current.isCurrent(runId) && garmentRef.current?.id === garmentId;
+    const startedAt = Date.now();
+    setTryOnStartedAt(startedAt);
+    setProgressStage("preparing");
+    if (!photo || photo.file !== personFile) setPhoto({ url: URL.createObjectURL(personFile), name: personFile.name || "Camera photo", file: personFile });
     setStatus("loading");
     setMessage("");
     setResultUrl(null);
+    setResultCached(false);
+    setCurrentResult(null);
+    setShareUrl(null);
+    setShareActionId(null);
     const controller = new AbortController();
+    const abortFromTurn = () => controller.abort();
+    turnSignal?.addEventListener("abort", abortFromTurn, { once: true });
     requestController.current = controller;
     let timeoutReached = false;
     let timeoutId: number | undefined;
+    const backgroundStageTimer = window.setTimeout(() => { if (isCurrentRun() && !controller.signal.aborted) setProgressStage("background"); }, 800);
+
+    const publishResult = async (url: string, cached: boolean) => {
+      setProgressStage("finishing");
+      if (demoOffline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+        if (controller.signal.aborted) { if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again."); return; }
+        if (!isCurrentRun()) return;
+      } else {
+        await new Promise((resolve) => window.setTimeout(resolve, 300));
+        if (controller.signal.aborted) { if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again."); return; }
+        if (!isCurrentRun()) return;
+      }
+      const selectedGarment = closetRef.current.find((item) => item.id === garmentId);
+      const name = selectedGarment?.name ?? "Closet piece";
+      const parsedSize = sizeHint?.match(/size\s+([a-z0-9]+)/i)?.[1]?.toUpperCase();
+      const record: TryOnResultRecord = { id: crypto.randomUUID(), url, cached, garmentId, garmentName: name, personFile, whyFits: buildWhyFits(name), createdAt: Date.now(), ...(parsedSize ? { size: parsedSize } : {}) };
+      setRecentResults((items) => [record, ...items.filter((item) => item.id !== record.id)].slice(0, 3));
+      setCurrentResult(record); setResultUrl(url); setResultCached(cached); setMessage(""); setStatus("result");
+      const duration = Date.now() - startedAt;
+      if (!cached && duration >= 3_000) {
+        try {
+          const key = "closetai:tryon-duration-history:v1";
+          const previous = JSON.parse(localStorage.getItem(key) || "[]") as number[];
+          const samples = [...previous.filter((value) => Number.isFinite(value) && value > 0), duration].slice(-5);
+          localStorage.setItem(key, JSON.stringify(samples));
+          const average = Math.round(samples.reduce((sum, value) => sum + value, 0) / samples.length);
+          setAverageDurationMs(average);
+        } catch { /* Keep the current estimate if local timing history cannot be saved. */ }
+      }
+    };
 
     try {
+      timeoutId = window.setTimeout(() => { timeoutReached = true; controller.abort(); }, 90_000);
       const formData = new FormData();
       formData.append("photo", personFile);
       formData.append("garment", garmentFile);
+      formData.append("garmentId", garmentId);
+      if (sizeHint) formData.append("garment_des", `clothing, ${sizeHint}`);
 
       const response = await fetch("/api/tryon", { method: "POST", body: formData, signal: controller.signal });
       const payload: unknown = await response.json();
       const data = payload && typeof payload === "object"
-        ? payload as { jobId?: unknown; status?: unknown; resultUrl?: unknown; error?: unknown }
+        ? payload as { jobId?: unknown; status?: unknown; resultUrl?: unknown; cached?: unknown; error?: unknown }
         : {};
 
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || !isCurrentRun()) return;
 
       if (!response.ok) {
         throw new Error(typeof data.error === "string" ? data.error : "We couldn’t generate your look. Please try again.");
@@ -215,21 +381,25 @@ export default function Home() {
         if (typeof data.resultUrl !== "string" || !data.resultUrl) {
           throw new Error("The cached try-on result is missing its image. Please try again.");
         }
-        setResultUrl(data.resultUrl);
-        setStatus("result");
+        if (demoOffline) {
+          setProgressStage("background"); await new Promise((resolve) => window.setTimeout(resolve, 250));
+          setProgressStage("generating"); await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+        const committed = await fetch(`/api/tryon/${encodeURIComponent(data.jobId)}`, { signal: controller.signal });
+        const committedJob = await committed.json().catch(() => null) as { status?: unknown; resultUrl?: unknown; cached?: unknown } | null;
+        if (!committed.ok || committedJob?.status !== "succeeded" || typeof committedJob.resultUrl !== "string") throw new Error("The try-on result is still being saved. Please check again in a moment.");
+        await publishResult(committedJob.resultUrl, committedJob.cached === true || data.cached === true);
         return;
       }
 
       const deadline = Date.now() + 90_000;
-      timeoutId = window.setTimeout(() => {
-        timeoutReached = true;
-        controller.abort();
-      }, 90_000);
+      window.clearTimeout(backgroundStageTimer);
+      setProgressStage("generating");
       setMessage("Your look is queued up…");
 
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 2_000));
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || !isCurrentRun()) {
           if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
           return;
         }
@@ -244,10 +414,10 @@ export default function Home() {
         }
         const statusPayload: unknown = await statusResponse.json().catch(() => null);
         const job = statusPayload && typeof statusPayload === "object"
-          ? statusPayload as { status?: unknown; resultUrl?: unknown; error?: unknown; retryable?: unknown }
+          ? statusPayload as { status?: unknown; resultUrl?: unknown; cached?: unknown; error?: unknown; retryable?: unknown }
           : {};
 
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || !isCurrentRun()) {
           if (timeoutReached) throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
           return;
         }
@@ -263,9 +433,7 @@ export default function Home() {
           if (typeof job.resultUrl !== "string" || !job.resultUrl) {
             throw new Error("The try-on finished without returning an image. Please try again.");
           }
-          setResultUrl(job.resultUrl);
-          setMessage("");
-          setStatus("result");
+          await publishResult(job.resultUrl, job.cached === true);
           return;
         }
         if (job.status === "failed") {
@@ -276,16 +444,20 @@ export default function Home() {
           throw new Error("The try-on service returned an unknown job status.");
         }
 
+        setProgressStage("generating");
         setMessage(job.status === "processing" ? "Generating your look…" : "Your look is queued up…");
       }
 
       throw new Error("Your try-on is taking longer than 90 seconds. Please try again.");
     } catch (error) {
-      if (controller.signal.aborted && !timeoutReached) return;
+      if ((controller.signal.aborted && !timeoutReached) || !isCurrentRun()) return;
       setMessage(error instanceof Error ? error.message : "Something went wrong. Please try again.");
       setStatus("error");
     } finally {
+      window.clearTimeout(backgroundStageTimer);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      turnSignal?.removeEventListener("abort", abortFromTurn);
+      if (controller.signal.aborted && !timeoutReached && isCurrentRun()) { setMessage(""); setStatus("idle"); }
       if (requestController.current === controller) requestController.current = null;
     }
   }
@@ -293,76 +465,94 @@ export default function Home() {
   function resetForm() {
     cancelPendingRequest();
     setPhoto(null);
-    if (mode === "photo") setGarment(null);
+    if (mode === "photo") { garmentRef.current = null; setGarment(null); }
     setResultUrl(null);
+    setResultCached(false);
+    setShareUrl(null);
+    setShareActionId(null);
     setMessage("");
     setStatus("idle");
   }
 
+  function navigate(tab: AppTab) {
+    setActiveTab(tab);
+    if (tab === "share" && resultUrl && !shareUrl) setShareActionId((current) => current ?? crypto.randomUUID());
+  }
+
   return (
-    <main className="page-shell">
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="ClosetAI home">
-          <span className="brand-mark"><span /><span /><span /></span>
-          <span>closet<span className="brand-ai">ai</span></span>
+    <main className="app-shell">
+      <header className="app-topbar">
+        <a className="app-brand" href="#closet" onClick={(event) => { event.preventDefault(); navigate("closet"); }} aria-label="ClosetAI home">
+          <span className="brand-mark"><span /><span /><span /></span><span>ClosetAI</span>
         </a>
-        <div className="topbar-right"><span className="beta-pill"><span /> HACKATHON BUILD</span><span className="topbar-divider" /><span className="topbar-caption">Your personal fitting room</span></div>
+        {demoOffline && <span className="demo-mode-pill">DEMO MODE</span>}
       </header>
 
-      <div className={`main-content ${mode === "live" ? "has-live-mode" : ""}`}>
-        <section className="hero">
-          <div className="eyebrow"><span className="eyebrow-line" /> THE FUTURE FITS YOU <span className="eyebrow-line" /></div>
-          <h1>Meet your <span>new look.</span></h1>
-          <p className="hero-subtitle">Your clothes, your photo, a little <span>what if?</span></p>
-          <p className="hero-description">See how something looks on you before it ever lands in your closet.<br className="desktop-break" /> Just add a photo, pick a piece, and let the magic happen.</p>
-          <div className="micro-proof"><span className="proof-icon"><SparkleIcon /></span> A fitting room that goes wherever you do.</div>
-        </section>
+      <div className="app-main">
+        {activeTab === "closet" && <section className="app-screen" aria-labelledby="closet-title">
+          <div className="screen-heading"><span className="screen-eyebrow">YOUR WARDROBE</span><h1 id="closet-title">Closet</h1><p>Keep your favorite pieces close. Pick one when you’re ready to try it on.</p></div>
+          {closet.length === 0 ? <div className="screen-empty closet-empty">
+            <span className="empty-illustration" aria-hidden="true">♧</span><h2>Your closet is empty</h2><p>Add a clear photo of a clothing item to start building your digital wardrobe.</p>
+          </div> : <div className="closet-grid" aria-label="Your closet pieces">
+            {closet.map((item) => <article className={`closet-card ${garment?.id === item.id ? "is-selected" : ""}`} key={item.id}>
+              <button type="button" className="closet-card-select" aria-pressed={garment?.id === item.id} onClick={() => selectGarment(item.id)}>
+                <img src={item.url} alt={item.name} /><span className="closet-card-name">{item.name}</span><small>{garment?.id === item.id ? "Selected for try-on" : "Select for try-on"}</small>
+              </button>
+              <button type="button" className="closet-card-remove" onClick={() => removeClosetGarment(item.id)} aria-label={`Remove ${item.name} from closet`}>Remove</button>
+            </article>)}
+          </div>}
+          <label className={`primary-cta closet-add-cta ${closet.length >= 12 ? "is-disabled" : ""}`} htmlFor="closet-piece-upload"><UploadIcon /><span>{closet.length ? "Add another piece" : "Add your first piece"}</span></label>
+          <input id="closet-piece-upload" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" disabled={closet.length >= 12} onChange={(event) => setUpload("garment", event)} aria-label="Upload a closet garment" />
+          {closet.length > 0 && <p className="screen-hint">{closet.length} of 12 pieces · Tap a piece to select it for try-on.</p>}
+        </section>}
 
-        <div className="tryon-modes" role="group" aria-label="Try-on mode">
-          <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("photo"); }}>Photo try-on</button>
-          <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("live"); }}>Live try-on <span>WEBCAM</span></button>
-        </div>
-
-        {status === "result" && resultUrl ? (
-          <section className="studio-card result-card" aria-labelledby="result-title">
-            <div className="result-heading"><span className="card-kicker">YOUR NEW LOOK</span><h2 id="result-title">A little something <em>new.</em></h2><p>Here’s your virtual try-on.</p></div>
-            <img
-              className="result-image"
-              src={resultUrl}
-              alt="Your virtual try-on result"
-              onError={() => {
-                setMessage("We couldn’t load the result image. Please try again.");
-                setStatus("error");
-              }}
-            />
-            <button className="try-button try-another-button" type="button" onClick={resetForm}><span aria-hidden="true">↺</span> Try another</button>
-          </section>
-        ) : mode === "live" ? (
-          <>
-            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={status === "loading"} />
-            {status === "loading" && <p className="live-job-message" role="status">{message || "Generating your look…"}</p>}
-            {status === "error" && <p className="live-job-message error-message" role="alert">{message}</p>}
-          </>
-        ) : (
-        <form className="studio-card" aria-label="Virtual try-on setup" aria-busy={status === "loading"} onSubmit={handleTryOn}>
-          <div className="card-topline"><div><span className="card-kicker">LET’S GET STARTED</span><h2 className="card-title">Build your look<span>.</span></h2></div><div className="step-progress"><div className={photo ? "progress-active" : ""} /><div className={garment ? "progress-active" : ""} /></div></div>
-          <div className="upload-grid">
-            <ImageUpload kind="photo" title="Your photo" description="Full-body & front-facing works best" image={photo?.url ?? null} fileName={photo?.name ?? null} onFile={(event) => setUpload("photo", event)} onRemove={() => removeUpload("photo")} />
-            <div className="between-mark" aria-hidden="true"><span>+</span></div>
-            <ImageUpload kind="garment" title="Garment" description="Any piece you’re curious about" image={garment?.url ?? null} fileName={garment?.name ?? null} onFile={(event) => setUpload("garment", event)} onRemove={() => removeUpload("garment")} />
+        {activeTab === "tryon" && <section className="app-screen" aria-labelledby="tryon-title">
+          <div className="screen-heading"><span className="screen-eyebrow">VIRTUAL FITTING ROOM</span><h1 id="tryon-title">Try-on</h1><p>See one of your closet pieces on you.</p></div>
+          <div className="tryon-modes app-mode-switch" role="group" aria-label="Try-on mode">
+            <button type="button" aria-pressed={mode === "photo"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("photo"); }}>Photo</button>
+            <button type="button" aria-pressed={mode === "live"} disabled={status === "loading"} onClick={() => { clearResult(); setMode("live"); }}>Live camera</button>
           </div>
-
-          <div className="action-area">
-            <button className={`try-button ${status === "loading" ? "is-loading" : ""}`} type="submit" disabled={!ready || status === "loading"}>
-              {status === "loading" ? <><span className="loading-spinner" aria-hidden="true" /><span>Generating your look…</span></> : <><SparkleIcon className="button-sparkle" /> <span>Try it on</span> <span className="button-arrow">↗</span></>}
+          {status === "result" && resultUrl ? <section className="tryon-result-screen">
+            <span className="screen-eyebrow">YOUR NEW LOOK{resultCached ? " · CACHED" : ""}</span><img className="result-image" src={resultUrl} alt="Your virtual try-on result" onError={() => { setMessage("We couldn’t load the result image. Please try again."); setStatus("error"); }} />
+            <p className="result-caption">{resultCached ? "Showing your saved look while live rendering is unavailable." : "Your look is ready."}</p>
+            <button className="primary-cta" type="button" onClick={resetForm}>Try another look</button>
+          </section> : mode === "live" ? <div className="tryon-live-screen">
+            <LiveTryOn garments={closet} selectedId={garment?.id ?? null} onSelect={selectGarment} onAdd={addGarment} onRemove={removeClosetGarment} onCapture={generateLook} busy={status === "loading"} demoOffline={demoOffline} />
+            {(status === "loading" || status === "error") && <p className={`live-job-message ${status === "error" ? "error-message" : ""}`} role={status === "error" ? "alert" : "status"}>{message || "Generating your look…"}</p>}
+          </div> : <form className="tryon-form" aria-label="Virtual try-on setup" aria-busy={status === "loading"} onSubmit={handleTryOn}>
+            <ImageUpload kind="photo" title="Your photo" description="Full-body and front-facing works best" image={photo?.url ?? null} fileName={photo?.name ?? null} onFile={(event) => setUpload("photo", event)} onRemove={() => removeUpload("photo")} />
+            <section className="garment-picker" aria-labelledby="garment-picker-title">
+              <div className="picker-heading"><h2 id="garment-picker-title">Choose a garment</h2>{garment && <span>Selected</span>}</div>
+              {closet.length ? <div className="garment-picker-list">{closet.map((item) => <button className={`garment-choice ${garment?.id === item.id ? "is-selected" : ""}`} type="button" key={item.id} aria-pressed={garment?.id === item.id} onClick={() => selectGarment(item.id)}><img src={item.url} alt="" /><span>{item.name}</span><i aria-hidden="true">{garment?.id === item.id ? "✓" : "○"}</i></button>)}</div> : <div className="inline-empty"><p>Add your first garment in the Closet tab to use the fitting room.</p></div>}
+            </section>
+            {status === "error" && <p className="screen-error" role="alert">{message}</p>}
+            <button className="primary-cta tryon-primary" type={closet.length ? "submit" : "button"} onClick={closet.length ? undefined : () => navigate("closet")} disabled={status === "loading" || (closet.length > 0 && !ready)}>
+              {status === "loading" ? <><span className="loading-spinner" aria-hidden="true" />Generating your look…</> : closet.length ? <><SparkleIcon />Try it on</> : "Add a garment first"}
             </button>
-            {status === "error" ? <p className="status-message error-message" role="alert">{message}</p> : <p className="button-hint" aria-live="polite">{status === "loading" ? message || "This can take a few seconds." : ready ? "Both images are ready — let’s see the fit." : "Add both images to unlock your virtual try-on."}</p>}
-          </div>
-          <div className="card-footer"><span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.5 5v4.2c0 4 2.7 6.8 6.5 8.3 3.8-1.5 6.5-4.3 6.5-8.3V5L10 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="m7.5 9.8 1.7 1.7 3.4-3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg> Photos are processed by Replicate. Generated results are stored at a public URL.</span><span className="footer-sparkle">✳</span></div>
-        </form>
-        )}
-        <p className="page-footnote"><span>MADE FOR THE “WHAT IF?”</span><span className="footnote-dot">·</span><span>ONE LOOK AT A TIME</span></p>
+            {status === "loading" ? <p className="screen-hint" role="status">{message || "Generating your look…"}</p> : <p className="screen-hint">{ready ? `Ready to try on ${garment?.name}.` : "Add your photo and select a garment to continue."}</p>}
+          </form>}
+        </section>}
+
+        {activeTab === "shop" && <section className="app-screen" aria-labelledby="shop-title">
+          <div className="screen-heading"><span className="screen-eyebrow">INSPIRED BY YOUR STYLE</span><h1 id="shop-title">Shop</h1><p>Build a look from public style descriptions, then find pieces you own or can shop.</p></div>
+        </section>}
+
+        {activeTab === "share" && <section className="app-screen" aria-labelledby="share-screen-title">
+          <div className="screen-heading"><span className="screen-eyebrow">YOUR LOOK, YOUR STORY</span><h1 id="share-screen-title">Share</h1><p>Turn a finished try-on into a post.</p></div>
+          {!resultUrl ? <div className="screen-empty share-empty"><span className="empty-illustration" aria-hidden="true">↗</span><h2>No look to share yet</h2><p>Make a try-on first. Your finished image will be ready here to crop and caption.</p><button type="button" className="primary-cta" onClick={() => navigate("tryon")}>Go to Try-on</button></div> : shareUrl ? <div className="published-post-card" role="status">
+            <img className="result-image" src={resultUrl} alt="Your shared try-on" /><div><span className="screen-eyebrow">POST SAVED</span><h2>Your look is ready to share</h2><a className="primary-cta" href={shareUrl} target="_blank" rel="noreferrer">Open share page <span aria-hidden="true">↗</span></a><button type="button" className="secondary-cta" onClick={() => void navigator.clipboard?.writeText(shareUrl)}>Copy link</button></div>
+          </div> : <>
+            <img className="share-source-image" src={resultUrl} alt="Try-on result to share" />
+            {shareActionId && <ShareComposer actionId={shareActionId} imageUrl={resultUrl} garmentName={garment?.name ?? "your new look"} onSaved={setShareUrl} onCancel={() => { setShareActionId(null); navigate("tryon"); }} />}
+          </>}
+        </section>}
+
+        <VoiceAgent garments={closet} selectedGarmentId={garment?.id ?? null} hasPhoto={Boolean(photo)} onSelectGarment={selectGarment} onTryOn={startVoiceTryOn} demoOffline={demoOffline} activeTab={activeTab} />
       </div>
+
+      <nav className="bottom-nav" aria-label="Main navigation">
+        {([ ["closet", "Closet"], ["tryon", "Try-on"], ["shop", "Shop"], ["share", "Share"] ] as const).map(([tab, label]) => <button type="button" key={tab} aria-current={activeTab === tab ? "page" : undefined} onClick={() => navigate(tab)}><TabIcon tab={tab} /><span>{label}</span></button>)}
+      </nav>
     </main>
   );
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import Replicate from "replicate";
-import { acquireTryOnPollLock, getTryOnJob, getTryOnRedis, releaseActiveTryOn, releaseTryOnPollLock, saveCachedTryOnResult, saveTryOnJob } from "@/lib/tryon-jobs";
+import { acquireTryOnPollLock, getCachedGarmentResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, releaseTryOnPollLock, saveCachedGarmentResult, saveCachedTryOnResult, saveTryOnJob } from "@/lib/tryon-jobs";
 import { persistTryOnResult } from "@/lib/tryon-storage";
 import { withReplicateRetry } from "@/lib/replicate-retry";
 
@@ -15,7 +15,7 @@ function errorResponse(message: string, status: number) {
 
 function jobResponse(job: NonNullable<Awaited<ReturnType<typeof getTryOnJob>>>) {
   return NextResponse.json(
-    { status: job.status, ...(job.resultUrl ? { resultUrl: job.resultUrl } : {}), ...(job.error ? { error: job.error } : {}), ...(job.retryable !== undefined ? { retryable: job.retryable } : {}) },
+    { status: job.status, ...(job.resultUrl ? { resultUrl: job.resultUrl } : {}), ...(job.cached ? { cached: true } : {}), ...(job.error ? { error: job.error } : {}), ...(job.retryable !== undefined ? { retryable: job.retryable } : {}) },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -47,13 +47,19 @@ export async function GET(
     return errorResponse("Try-on job not found.", 404);
   }
 
+  if (process.env.DEMO_OFFLINE === "1" && id === "00000000-0000-4000-8000-000000000001") {
+    return NextResponse.json({ status: "succeeded", resultUrl: "/demo/tryon-result.png", cached: true }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   const redis = getTryOnRedis();
   if (!redis) {
     return errorResponse("Upstash Redis is not configured on the server.", 503);
   }
 
+  let pollingJob: Awaited<ReturnType<typeof getTryOnJob>> = null;
   try {
     const job = await getTryOnJob(redis, id);
+    pollingJob = job;
     if (!job) return errorResponse("Try-on job not found or expired.", 404);
 
     if (job.status === "succeeded" || job.status === "failed") {
@@ -117,6 +123,7 @@ export async function GET(
           // that case so a duplicate POST can reuse the successful job.
           try {
             await saveCachedTryOnResult(redis, job.inputHash, updated.resultUrl);
+            if (job.garmentHash) await saveCachedGarmentResult(redis, job.garmentHash, updated.resultUrl, job.createdAt);
             resultCached = true;
           } catch {
             resultCached = false;
@@ -136,6 +143,18 @@ export async function GET(
       await releaseTryOnPollLock(redis, id, pollLockId);
     }
   } catch {
+    if (pollingJob?.garmentHash) {
+      try {
+        const cachedUrl = await getCachedGarmentResult(redis, pollingJob.garmentHash);
+        if (cachedUrl) {
+          const cachedJob = { ...pollingJob, status: "succeeded" as const, resultUrl: cachedUrl, cached: true };
+          await saveTryOnJob(redis, cachedJob);
+          await releaseActiveTryOn(redis, cachedJob.inputHash, cachedJob.jobId);
+          return jobResponse(cachedJob);
+        }
+      } catch { /* Return the retryable status error below if no cached fallback is readable. */ }
+    }
+    console.error(JSON.stringify({ event: "tryon_status_check_failed", jobId: id }));
     return NextResponse.json(
       { error: "Could not check the try-on status. Please retry shortly." },
       { status: 503, headers: { "Cache-Control": "no-store", "Retry-After": "2" } },

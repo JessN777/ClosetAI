@@ -63,11 +63,31 @@ test("permission denial explains how to recover and keeps capture disabled", asy
   await expect(page.getByRole("button", { name: "Try camera again" })).toBeEnabled();
 });
 
+test("the session closet preserves uploaded pieces and selection across modes", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Choose garment image").setInputFiles({ name: "First top.png", mimeType: "image/png", buffer: garment });
+  await page.getByRole("button", { name: "Live try-on" }).click();
+  await expect(page.getByRole("button", { name: "First top.png", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.locator('.closet-upload input').setInputFiles({ name: "Second top.png", mimeType: "image/png", buffer: garment });
+  await page.getByRole("button", { name: "First top.png", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Second top.png", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "Remove Second top.png from closet", exact: true }).click();
+  await page.getByRole("button", { name: "Photo try-on", exact: true }).click();
+  await page.getByLabel("Choose your photo image").setInputFiles({ name: "Person.jpg", mimeType: "image/jpeg", buffer: person });
+  await expect.poll(() => page.getByAltText("Preview of garment").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(512);
+  await page.getByRole("button", { name: "Live try-on" }).click();
+  await expect(page.getByRole("button", { name: "First top.png", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".closet-piece")).toHaveCount(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Start camera" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("real MediaPipe tracks a webcam stream, clears lost poses, and submits a clean frame to the job flow", async ({ page }, testInfo) => {
   await fakeCamera(page);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") console.warn("Browser:", message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" || message.text().startsWith("Pose")) console.warn("Browser:", message.text()); });
   let postedPhoto: Buffer | null = null;
   let postedGarment: Buffer | null = null;
   let posts = 0;

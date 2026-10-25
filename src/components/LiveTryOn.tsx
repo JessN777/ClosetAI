@@ -12,18 +12,21 @@ type Props = {
   onSelect: (id: string) => void;
   onAdd: (file: File) => void;
   onRemove: (id: string) => void;
-  onCapture: (photo: File, garment: File) => Promise<void>;
+  onCapture: (photo: File, garment: File, garmentId: string) => Promise<void>;
   busy: boolean;
+  demoOffline?: boolean;
 };
 
-export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRemove, onCapture, busy }: Props) {
+export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRemove, onCapture, busy, demoOffline = false }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textureRef = useRef<HTMLCanvasElement | null>(null);
   const poseRef = useRef<TorsoPose | null>(null);
+  const demoSmootherRef = useRef(new PoseSmoother());
   const lastPoseAtRef = useRef(0);
   const fitRef = useRef<GarmentFit>({ width: 1.08, length: 1.04 });
   const capturePendingRef = useRef(false);
+  const overlayEnabledRef = useRef(true);
   const mountedRef = useRef(true);
   const [cameraRequested, setCameraRequested] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -38,9 +41,11 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
   const [garmentMessage, setGarmentMessage] = useState("");
   const [captureMessage, setCaptureMessage] = useState("");
   const [capturing, setCapturing] = useState(false);
+  const [overlayEnabled, setOverlayEnabled] = useState(true);
   const selected = garments.find((item) => item.id === selectedId) ?? null;
 
   useEffect(() => { fitRef.current = fit; }, [fit]);
+  useEffect(() => { overlayEnabledRef.current = overlayEnabled; }, [overlayEnabled]);
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
@@ -57,7 +62,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
         textureRef.current = texture;
         setTextureReady(true);
       }).catch((error: unknown) => {
-        if (!cancelled) setGarmentMessage(error instanceof Error ? error.message : "This garment could not be opened.");
+        if (!cancelled) { console.error(JSON.stringify({ event: "live_garment_preview_failed" })); setGarmentMessage(error instanceof Error ? error.message : "This garment could not be opened."); }
       });
     }
     return () => { cancelled = true; textureRef.current = null; };
@@ -68,9 +73,64 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
     const video = videoRef.current;
     const overlay = canvasRef.current;
     if (!video || !overlay) return;
+    if (demoOffline) {
+      let disposed = false;
+      let animation = 0;
+      const smoother = demoSmootherRef.current;
+      let frames: Array<{ timestamp: number; landmarks: Array<{ id: number; x: number; y: number; visibility: number }> }> = [];
+      let frameIndex = 0;
+      const context = overlay.getContext("2d");
+      const failDemo = () => {
+        if (disposed) return;
+        console.error(JSON.stringify({ event: "demo_pose_cache_unavailable" }));
+        setCameraState("error");
+        setCameraMessage("The offline pose recording is unavailable. You can still use the static garment preview or photo try-on.");
+      };
+      void Promise.all([
+        fetch("/demo/pose-landmarks.json").then((response) => { if (!response.ok) throw new Error("pose cache missing"); return response.json(); }),
+        new Promise<void>((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error("demo image missing"));
+          image.src = "/demo/person.png";
+        }),
+      ]).then(([recording]) => {
+        if (disposed) return;
+        frames = recording.frames;
+        if (!frames.length || !context) throw new Error("empty pose recording");
+        overlay.width = recording.width;
+        overlay.height = recording.height;
+        setAspectRatio(`${recording.width} / ${recording.height}`);
+        setCameraState("running");
+        setCameraMessage("Replaying the locally recorded pose. Camera and network are not used.");
+        setHasPose(true);
+        setFps({ preview: 30, tracking: 30 });
+        lastPoseAtRef.current = performance.now();
+        const renderDemo = (now: number) => {
+          if (disposed) return;
+          animation = requestAnimationFrame(renderDemo);
+          const frame = frames[frameIndex++ % frames.length];
+          const landmarks = Array.from({ length: 33 }, () => ({ x: 0, y: 0, visibility: 0 }));
+          for (const point of frame.landmarks) landmarks[point.id] = point;
+          poseRef.current = smoother.update(landmarks, now);
+          lastPoseAtRef.current = now;
+          context.clearRect(0, 0, overlay.width, overlay.height);
+          if (overlayEnabledRef.current && textureRef.current && poseRef.current) drawLiveGarment(context, textureRef.current, poseRef.current, fitRef.current);
+        };
+        animation = requestAnimationFrame(renderDemo);
+      }).catch(failDemo);
+      return () => {
+        disposed = true;
+        cancelAnimationFrame(animation);
+        smoother.reset();
+        poseRef.current = null;
+        context?.clearRect(0, 0, overlay.width, overlay.height);
+      };
+    }
     let disposed = false;
     let stream: MediaStream | null = null;
     let worker: Worker | null = null;
+    let delegate: "GPU" | "CPU" | null = null;
     let animation = 0;
     let initTimeout: ReturnType<typeof setTimeout> | undefined;
     let frameTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -106,6 +166,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
       setCameraState(state);
       setCameraMessage(message);
       setHasPose(false);
+      console.error(JSON.stringify({ event: "live_tryon_unavailable", cameraState: state }));
     };
     const showPresence = (present: boolean) => {
       if (present !== previouslyVisible) {
@@ -124,7 +185,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
         context!.clearRect(0, 0, overlay.width, overlay.height);
         const fresh = poseRef.current && now - lastPoseAtRef.current < 500;
         showPresence(!!fresh);
-        if (fresh && textureRef.current) drawLiveGarment(context!, textureRef.current, poseRef.current!, fitRef.current);
+        if (fresh && overlayEnabledRef.current && textureRef.current) drawLiveGarment(context!, textureRef.current, poseRef.current!, fitRef.current);
       }
       if (now - statsAt >= 1000) {
         const seconds = (now - statsAt) / 1000;
@@ -137,17 +198,70 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
         lastVideoTime = video.currentTime;
         lastInference = now;
         inferenceContext!.drawImage(video, 0, 0, inferenceCanvas.width, inferenceCanvas.height);
+        const targetWorker = worker;
         createImageBitmap(inferenceCanvas).then((bitmap) => {
-          if (disposed) { bitmap.close(); return; }
+          if (disposed || worker !== targetWorker) { bitmap.close(); return; }
           try {
-            worker!.postMessage({ type: "frame", bitmap, timestamp: now } satisfies PoseRequest, [bitmap]);
-            frameTimeout = setTimeout(() => fail("error", "Tracking is not responding. Restart the camera or use photo upload."), 10_000);
+            targetWorker!.postMessage({ type: "frame", bitmap, timestamp: now } satisfies PoseRequest, [bitmap]);
+            frameTimeout = setTimeout(() => {
+              if (delegate === "GPU") initializeWorker(true);
+              else fail("error", "Tracking is not responding. Restart the camera or use photo upload.");
+            }, 10_000);
           } catch {
             bitmap.close();
             fail("error", "Could not read the camera frame. Please restart the camera.");
           }
         }).catch(() => fail("error", "Could not read the camera frame. Please restart the camera."));
       }
+    };
+
+    const initializeWorker = (forceCpu = false) => {
+      cancelAnimationFrame(animation);
+      clearTimeout(initTimeout);
+      clearTimeout(frameTimeout);
+      worker?.terminate();
+      delegate = null;
+      inFlight = false;
+      lastVideoTime = -1;
+      frames = 0; detections = 0;
+      smoother.reset();
+      poseRef.current = null;
+      context?.clearRect(0, 0, overlay.width, overlay.height);
+      showPresence(false);
+      if (forceCpu) {
+        setCameraState("starting");
+        setCameraMessage("Optimizing pose tracking for this device…");
+      }
+      const currentWorker = new Worker(new URL("../workers/pose.worker.ts", import.meta.url));
+      worker = currentWorker;
+      currentWorker.onmessage = ({ data }: MessageEvent<PoseResponse>) => {
+        if (disposed || worker !== currentWorker) return;
+        if (data.type === "ready") {
+          clearTimeout(initTimeout);
+          delegate = data.delegate;
+          setCameraState("running");
+          setCameraMessage("");
+          statsAt = performance.now();
+          animation = requestAnimationFrame(render);
+        } else if (data.type === "pose") {
+          clearTimeout(frameTimeout);
+          inFlight = false;
+          detections++;
+          poseRef.current = smoother.update(data.landmarks, data.timestamp);
+          lastPoseAtRef.current = data.timestamp;
+        } else if (delegate === "GPU") {
+          initializeWorker(true);
+        } else {
+          fail("error", data.message);
+        }
+      };
+      currentWorker.onerror = () => {
+        if (disposed || worker !== currentWorker) return;
+        if (delegate === "GPU") initializeWorker(true);
+        else fail("error", "Pose tracking could not start. Check your connection or use photo upload.");
+      };
+      initTimeout = setTimeout(() => fail("error", "Pose tracking took too long to load. Check your connection and restart the camera."), 45_000);
+      currentWorker.postMessage({ type: "init", ...(forceCpu ? { delegate: "CPU" as const } : {}) } satisfies PoseRequest);
     };
 
     const start = async () => {
@@ -178,28 +292,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
         inferenceCanvas.width = 384;
         inferenceCanvas.height = Math.max(1, Math.round(384 * video.videoHeight / video.videoWidth));
         setCameraMessage("Loading pose tracking… The first load may take a moment.");
-        worker = new Worker(new URL("../workers/pose.worker.ts", import.meta.url));
-        worker.onmessage = ({ data }: MessageEvent<PoseResponse>) => {
-          if (disposed) return;
-          if (data.type === "ready") {
-            clearTimeout(initTimeout);
-            setCameraState("running");
-            setCameraMessage("");
-            statsAt = performance.now();
-            animation = requestAnimationFrame(render);
-          } else if (data.type === "pose") {
-            clearTimeout(frameTimeout);
-            inFlight = false;
-            detections++;
-            poseRef.current = smoother.update(data.landmarks, data.timestamp);
-            lastPoseAtRef.current = data.timestamp;
-          } else {
-            fail("error", data.message);
-          }
-        };
-        worker.onerror = () => fail("error", "Pose tracking could not start. Check your connection or use photo upload.");
-        initTimeout = setTimeout(() => fail("error", "Pose tracking took too long to load. Check your connection and restart the camera."), 45_000);
-        worker.postMessage({ type: "init" } satisfies PoseRequest);
+        initializeWorker();
       } catch (error) {
         const name = error instanceof DOMException ? error.name : "";
         if (name === "NotAllowedError" || name === "SecurityError") {
@@ -215,7 +308,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
     };
     void start();
     return cleanup;
-  }, [cameraRequested, attempt]);
+  }, [cameraRequested, attempt, demoOffline]);
 
   function startCamera() {
     setCameraState("starting");
@@ -236,7 +329,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
   }
 
   async function capture() {
-    if (busy || capturePendingRef.current || !selected || !videoRef.current) return;
+    if (busy || capturePendingRef.current || !selected || (!demoOffline && !videoRef.current)) return;
     if (!poseRef.current || performance.now() - lastPoseAtRef.current > 500) {
       setCaptureMessage("Step into view with your shoulders and hips visible before capturing.");
       return;
@@ -245,9 +338,14 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
     setCapturing(true);
     setCaptureMessage("");
     try {
-      const photo = await captureCameraPhoto(videoRef.current);
-      if (mountedRef.current) await onCapture(photo, selected.file);
+      const selectedSnapshot = selected;
+      const selectedIdSnapshot = selected.id;
+      const photo = demoOffline
+        ? new File([await (await fetch("/demo/person.png")).blob()], "closetai-demo-person.png", { type: "image/png" })
+        : await captureCameraPhoto(videoRef.current!);
+      if (mountedRef.current) await onCapture(photo, selectedSnapshot.file, selectedIdSnapshot);
     } catch (error) {
+      console.error(JSON.stringify({ event: "live_tryon_capture_failed" }));
       if (mountedRef.current) setCaptureMessage(error instanceof Error ? error.message : "The frame could not be captured. Please try again.");
     } finally {
       capturePendingRef.current = false;
@@ -266,7 +364,8 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
         <div className="live-camera-column">
           <div className="camera-stage" style={{ aspectRatio }}>
             <div className="camera-mirror">
-              <video ref={videoRef} autoPlay muted playsInline aria-label="Mirrored webcam preview" />
+              {demoOffline && cameraState === "running" && <img className="demo-pose-image" src="/demo/person.png" alt="Recorded demo pose" />}
+              <video className={demoOffline ? "demo-hidden-video" : ""} ref={videoRef} autoPlay muted playsInline aria-label="Mirrored webcam preview" />
               <canvas ref={canvasRef} className="garment-overlay" aria-label="Garment fitted to your pose" />
             </div>
             {cameraState !== "running" ? (
@@ -274,6 +373,7 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
                 <span className="camera-symbol" aria-hidden="true">◎</span>
                 <h3>{cameraState === "denied" ? "Camera permission needed" : cameraState === "error" ? "Camera unavailable" : cameraState === "starting" ? "Getting your fitting room ready" : "Step into your closet"}</h3>
                 <p role={cameraState === "denied" || cameraState === "error" ? "alert" : "status"}>{cameraState === "idle" ? "Choose a top and turn on your camera. Keep your shoulders, hips, and elbows in view." : cameraMessage}</p>
+                {(cameraState === "denied" || cameraState === "error") && selected && <div className="static-garment-fallback"><img src={selected.url} alt={`${selected.name} static preview`} /><span>Selected garment preview</span></div>}
                 {cameraState !== "starting" && <button type="button" className="camera-button" onClick={startCamera}>{cameraState === "idle" ? "Start camera" : "Try camera again"}</button>}
               </div>
             ) : (
@@ -284,8 +384,10 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
           </div>
           <div className="camera-toolbar">
             <span className="camera-fps" aria-label="Live performance">{cameraState === "running" ? `${fps.preview} FPS preview · ${fps.tracking} FPS tracking` : "Mirrored preview · local pose tracking"}</span>
+            <label className="live-overlay-toggle"><input type="checkbox" checked={overlayEnabled} onChange={(event) => setOverlayEnabled(event.target.checked)} /> Show CV overlay</label>
             {(cameraState === "running" || cameraState === "starting") && <button type="button" className="text-button" onClick={stopCamera}>Stop camera</button>}
           </div>
+          {cameraState === "running" && !overlayEnabled && <p className="live-note">CV overlay is off. Turn it on for a quick fit check.</p>}
           {cameraState === "running" && fps.preview > 0 && fps.tracking > 0 && fps.tracking < 15 && <p className="live-note">Tracking is slow on this device. Close other camera apps or tabs for a smoother fit.</p>}
           <p className="live-note">Face forward with your arms slightly apart. This 2D preview works best with front-facing tops and transparent cutouts.</p>
         </div>
@@ -321,9 +423,9 @@ export default function LiveTryOn({ garments, selectedId, onSelect, onAdd, onRem
       </div>
       <div className="live-capture-area">
         <button className="try-button capture-button" type="button" disabled={!canCapture} onClick={() => void capture()}>
-          {busy || capturing ? <><span className="loading-spinner" />{busy ? "Generating your look…" : "Capturing…"}</> : "Take high-quality look"}
+          {busy || capturing ? <><span className="loading-spinner" />{busy ? "Generating your look…" : "Capturing…"}</> : "Create high-quality render"}
         </button>
-        <p className="live-note">Captures a clean camera frame and sends it with your selected garment for a realistic render. The live fit adjustments stay in the preview.</p>
+        <p className="live-note">Separate from the live overlay: sends a clean camera frame and selected garment through the high-quality try-on render.</p>
         {captureMessage && <p className="error-message live-note" role="alert">{captureMessage}</p>}
       </div>
       <div className="card-footer"><span>Live frames stay on your device. Captured photos go to Replicate; generated results use a public URL.</span></div>

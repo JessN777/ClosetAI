@@ -1,0 +1,32 @@
+[
+  {
+    "id": "shirt-search",
+    "audio": "01-shirt-search.wav",
+    "transcript": "I'm looking for this shirt."
+  },
+  {
+    "id": "barge-in",
+    "audio": "02-barge-in.wav",
+    "transcript": "Actually, show me a navy option."
+  },
+  {
+    "id": "style-match",
+    "audio": "03-style-match.wav",
+    "transcript": "Find something that looks good on me."
+  },
+  {
+    "id": "remember-navy",
+    "audio": "04-remember-navy.wav",
+    "transcript": "Remember I prefer navy."
+  },
+  {
+    "id": "dress-like",
+    "audio": "05-dress-like.wav",
+    "transcript": "Dress like quiet luxury."
+  },
+  {
+    "id": "shop-the-look",
+    "audio": "06-shop-the-look.wav",
+    "transcript": "Shop the quiet luxury look."
+  }
+]

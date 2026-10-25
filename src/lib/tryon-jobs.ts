@@ -6,11 +6,13 @@ export type TryOnJob = {
   jobId: string;
   predictionId?: string;
   inputHash: string;
+  garmentHash?: string;
   status: TryOnStatus;
   createdAt: number;
   resultUrl?: string;
   error?: string;
   retryable?: boolean;
+  cached?: boolean;
 };
 
 const JOB_TTL_SECONDS = 24 * 60 * 60;
@@ -132,4 +134,28 @@ export async function getCachedTryOnResult(redis: Redis, inputHash: string) {
 
 export async function saveCachedTryOnResult(redis: Redis, inputHash: string, resultUrl: string) {
   await redis.set(resultCacheKey(inputHash), { resultUrl });
+}
+
+function garmentResultKey(garmentHash: string) {
+  return `closetai:tryon:garment-result:v1:${garmentHash}`;
+}
+
+export async function getCachedGarmentResult(redis: Redis, garmentHash: string) {
+  const cached = await redis.get<{ resultUrl: string }>(garmentResultKey(garmentHash));
+  return cached && typeof cached.resultUrl === "string" ? cached.resultUrl : null;
+}
+
+/** Keep the newest successful result for a garment, even when person inputs differ. */
+export async function saveCachedGarmentResult(redis: Redis, garmentHash: string, resultUrl: string, createdAt: number) {
+  await redis.eval<string[], number>(
+    `local raw = redis.call('GET', KEYS[1])
+     if raw then
+       local previous = cjson.decode(raw)
+       if tonumber(previous.createdAt or 0) > tonumber(ARGV[2]) then return 0 end
+     end
+     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+     return 1`,
+    [garmentResultKey(garmentHash)],
+    [JSON.stringify({ resultUrl, createdAt }), String(createdAt), String(JOB_TTL_SECONDS)],
+  );
 }

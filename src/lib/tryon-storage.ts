@@ -1,5 +1,4 @@
 import { createClient } from "@supabase/supabase-js";
-import sharp from "sharp";
 
 const BUCKET_NAME = "tryon-results";
 const MAX_RESULT_BYTES = 25 * 1024 * 1024;
@@ -54,6 +53,7 @@ export async function persistTryOnResult(inputHash: string, replicateUrl: string
   const downloadedBytes = await readLimitedResponse(response, MAX_RESULT_BYTES);
   if (!downloadedBytes.byteLength) throw new Error("The Replicate output image was empty.");
 
+  const sharp = (await import("sharp")).default;
   const pngBytes = await sharp(downloadedBytes).png().toBuffer();
   const path = `${inputHash}.png`;
   const supabase = createClient(supabaseUrl, serviceRoleKey, {

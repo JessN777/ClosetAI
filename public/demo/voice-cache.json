@@ -1,0 +1,63 @@
+{
+  "ba440214f1ba079a046e3194dfbac2c76f48e18ea90c6cc5ba6a2b8215aa8edf": {
+    "reply": "I found navy layers that fit your everyday style and budget.",
+    "toolCalls": [
+      {
+        "id": "demo-search-shirt",
+        "name": "search_shopping",
+        "arguments": "{\"query\":\"navy shirt\"}"
+      }
+    ]
+  },
+  "45f758d1830716445da72d318c057fe46baefa9ca47ccc72d8f2eb782f9d4733": {
+    "reply": "Here are three cached navy pieces that work with your closet.",
+    "toolCalls": [
+      {
+        "id": "demo-search-navy",
+        "name": "search_shopping",
+        "arguments": "{\"query\":\"navy casual layer\"}"
+      }
+    ],
+    "thinkingDelayMs": 1400
+  },
+  "aa84d1b0575a370ba0f693beff6477938fa720afa11b5a487c0b5b4c3e0bb9ba": {
+    "reply": "Your reference style points to relaxed navy layers. Here is a look using pieces from your closet.",
+    "toolCalls": [
+      {
+        "id": "demo-style-match",
+        "name": "suggest_outfit",
+        "arguments": "{\"occasion\":\"everyday\",\"styleNotes\":\"relaxed navy layers, clean minimal style\"}"
+      }
+    ]
+  },
+  "b0a327dae4b9aa5c78a2ef38651a19accd8e6cdede046c0e0aa3ce800cbe0195": {
+    "reply": "Got it. I saved navy as your favorite color.",
+    "toolCalls": [
+      {
+        "id": "demo-remember-navy",
+        "name": "remember_preference",
+        "arguments": "{\"category\":\"favoriteColors\",\"value\":\"navy\"}"
+      }
+    ]
+  },
+  "813409e2839cc3b0abbb4a406956f116c6a8c3cba05c444e00debbe5c4216a1a": {
+    "reply": "Quiet luxury is relaxed, understated tailoring with a restrained neutral palette. I found one piece you own and three opportunities to complete the look.",
+    "toolCalls": [
+      {
+        "id": "demo-dress-like",
+        "name": "dress_like",
+        "arguments": "{\"lookName\":\"Quiet luxury\"}"
+      }
+    ]
+  },
+  "46855ccccef51544025b1a24c8f6b601614a36f693012df039c27e00a50f81bf": {
+    "reply": "I found four pieces, your closet has a close jacket match, and three pieces have retailer options. The value estimate is about $136. Nothing was purchased.",
+    "toolCalls": [
+      {
+        "id": "demo-shop-the-look",
+        "name": "shop_the_look",
+        "arguments": "{\"lookName\":\"Quiet luxury\",\"occasion\":\"everyday\"}"
+      }
+    ]
+  }
+}

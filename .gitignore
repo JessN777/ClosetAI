@@ -7,3 +7,6 @@ out/
 test-results/
 playwright-report/
 tests/.fixtures/
+__pycache__/
+*.py[cod]
+python-agent/.data/

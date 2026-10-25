@@ -2,9 +2,8 @@ import { NextResponse } from "next/server";
 import { createHash, randomUUID } from "node:crypto";
 import Replicate from "replicate";
 import { Ratelimit } from "@upstash/ratelimit";
-import { removeBackground } from "@imgly/background-removal-node";
-import sharp, { type Metadata } from "sharp";
-import { getCachedTryOnResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, reserveTryOnJob, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
+import type { Metadata } from "sharp";
+import { getCachedGarmentResult, getCachedTryOnResult, getTryOnJob, getTryOnRedis, releaseActiveTryOn, reserveTryOnJob, saveTryOnJob, type TryOnJob, type TryOnStatus } from "@/lib/tryon-jobs";
 import { hasTryOnStorageConfig } from "@/lib/tryon-storage";
 import { isRetryableReplicateError, withReplicateRetry } from "@/lib/replicate-retry";
 
@@ -57,29 +56,33 @@ async function validateImage(form: FormData, field: "photo" | "garment") {
   } catch {
     return errorResponse(`${label} image could not be read. Please upload it again.`, 400);
   }
-  let metadata: Metadata;
-  try {
-    metadata = await sharp(bytes).metadata();
-  } catch {
-    return errorResponse(`${label} must be a valid JPEG, PNG, or WebP image.`, 400);
-  }
+  if (process.env.DEMO_OFFLINE !== "1") {
+    let metadata: Metadata;
+    try {
+      const sharp = (await import("sharp")).default;
+      metadata = await sharp(bytes).metadata();
+    } catch {
+      return errorResponse(`${label} must be a valid JPEG, PNG, or WebP image.`, 400);
+    }
 
-  if (metadata.format !== declaredFormat) {
-    return errorResponse(`${label} file contents do not match its JPEG, PNG, or WebP type.`, 400);
-  }
-  if (!metadata.width || !metadata.height) {
-    return errorResponse(`${label} image dimensions could not be read.`, 400);
-  }
-  if (metadata.width < MIN_IMAGE_SIDE || metadata.height < MIN_IMAGE_SIDE) {
-    return errorResponse(`${label} must be at least 256 pixels wide and 256 pixels high.`, 400);
-  }
-  if (metadata.width > MAX_IMAGE_SIDE || metadata.height > MAX_IMAGE_SIDE) {
-    return errorResponse(`${label} cannot exceed 4096 pixels wide or 4096 pixels high.`, 400);
-  }
-  try {
-    await sharp(bytes, { failOn: "warning" }).resize(1, 1).toBuffer();
-  } catch {
-    return errorResponse(`${label} image could not be decoded. Upload a valid JPEG, PNG, or WebP file.`, 400);
+    if (metadata.format !== declaredFormat) {
+      return errorResponse(`${label} file contents do not match its JPEG, PNG, or WebP type.`, 400);
+    }
+    if (!metadata.width || !metadata.height) {
+      return errorResponse(`${label} image dimensions could not be read.`, 400);
+    }
+    if (metadata.width < MIN_IMAGE_SIDE || metadata.height < MIN_IMAGE_SIDE) {
+      return errorResponse(`${label} must be at least 256 pixels wide and 256 pixels high.`, 400);
+    }
+    if (metadata.width > MAX_IMAGE_SIDE || metadata.height > MAX_IMAGE_SIDE) {
+      return errorResponse(`${label} cannot exceed 4096 pixels wide or 4096 pixels high.`, 400);
+    }
+    try {
+      const sharp = (await import("sharp")).default;
+      await sharp(bytes, { failOn: "warning" }).resize(1, 1).toBuffer();
+    } catch {
+      return errorResponse(`${label} image could not be decoded. Upload a valid JPEG, PNG, or WebP file.`, 400);
+    }
   }
 
   return value;
@@ -87,6 +90,7 @@ async function validateImage(form: FormData, field: "photo" | "garment") {
 
 async function preparePersonPhoto(file: File) {
   const source = Buffer.from(await file.arrayBuffer());
+  const sharp = (await import("sharp")).default;
   return sharp(source)
     .rotate()
     .resize(768, 1024, {
@@ -98,6 +102,8 @@ async function preparePersonPhoto(file: File) {
 }
 
 async function prepareGarmentImage(file: File) {
+  const { removeBackground } = await import("@imgly/background-removal-node");
+  const sharp = (await import("sharp")).default;
   const source = new Blob([new Uint8Array(await file.arrayBuffer())], { type: file.type });
   const transparentCutout = await removeBackground(source, {
     model: "small",
@@ -157,7 +163,7 @@ export async function POST(request: Request) {
   }
 
   for (const field of form.keys()) {
-    if (!["photo", "garment", "garment_des"].includes(field)) {
+    if (!["photo", "garment", "garment_des", "garmentId"].includes(field)) {
       return errorResponse("The request contains an unsupported form field.", 400);
     }
   }
@@ -178,14 +184,14 @@ export async function POST(request: Request) {
   if (garmentDes.length > MAX_GARMENT_DESCRIPTION_LENGTH) {
     return errorResponse("Garment description must be 200 characters or fewer.", 400);
   }
+  const garmentIds = form.getAll("garmentId");
+  if (garmentIds.length > 1 || (garmentIds[0] !== undefined && typeof garmentIds[0] !== "string")) return errorResponse("Garment selection ID must be a single text value.", 400);
+
+  if (process.env.DEMO_OFFLINE === "1") {
+    return NextResponse.json({ jobId: "00000000-0000-4000-8000-000000000001", status: "succeeded", resultUrl: "/demo/tryon-result.png", cached: true });
+  }
 
   const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    return errorResponse(
-      "REPLICATE_API_TOKEN is missing. Add it to .env.local and restart the dev server.",
-      500,
-    );
-  }
 
   const redis = getTryOnRedis();
   if (!redis) {
@@ -232,6 +238,7 @@ export async function POST(request: Request) {
     ]);
 
     const inputHash = tryOnInputHash(personPng, garmentPng);
+    const garmentHash = createHash("sha256").update(garmentPng).digest("hex");
     const cachedResultUrl = await getCachedTryOnResult(redis, inputHash);
     const jobId = randomUUID();
 
@@ -239,15 +246,30 @@ export async function POST(request: Request) {
       const cachedJob: TryOnJob = {
         jobId,
         inputHash,
+        garmentHash,
         status: "succeeded",
         resultUrl: cachedResultUrl,
+        cached: true,
         createdAt: Date.now(),
       };
       await saveTryOnJob(redis, cachedJob);
-      return NextResponse.json({ jobId, status: "succeeded", resultUrl: cachedResultUrl });
+      return NextResponse.json({ jobId, status: "succeeded", resultUrl: cachedResultUrl, cached: true });
+    }
+
+    const cachedGarmentUrl = await getCachedGarmentResult(redis, garmentHash);
+    const returnCachedGarment = async () => {
+      const cachedJob: TryOnJob = { jobId, inputHash, garmentHash, status: "succeeded", resultUrl: cachedGarmentUrl!, cached: true, createdAt: Date.now() };
+      await saveTryOnJob(redis, cachedJob);
+      return NextResponse.json({ jobId, status: "succeeded", resultUrl: cachedGarmentUrl, cached: true });
+    };
+
+    if (!token) {
+      if (cachedGarmentUrl) return returnCachedGarment();
+      return errorResponse("Try-on generation is offline and no saved result exists for this garment yet.", 503);
     }
 
     if (!hasTryOnStorageConfig()) {
+      if (cachedGarmentUrl) return returnCachedGarment();
       return errorResponse(
         "Supabase Storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to the server environment.",
         503,
@@ -257,6 +279,7 @@ export async function POST(request: Request) {
     const pendingJob: TryOnJob = {
       jobId,
       inputHash,
+      garmentHash,
       status: "queued",
       createdAt: Date.now(),
     };
@@ -279,7 +302,7 @@ export async function POST(request: Request) {
     // A prior request may have populated the cache after this request's first lookup.
     const lateCachedResultUrl = await getCachedTryOnResult(redis, inputHash);
     if (lateCachedResultUrl) {
-      const cachedJob = { ...pendingJob, status: "succeeded" as const, resultUrl: lateCachedResultUrl };
+      const cachedJob = { ...pendingJob, status: "succeeded" as const, resultUrl: lateCachedResultUrl, cached: true };
       await saveTryOnJob(redis, cachedJob);
       await releaseActiveTryOn(redis, inputHash, jobId);
       return NextResponse.json({ jobId, status: "succeeded", resultUrl: lateCachedResultUrl });
@@ -324,6 +347,17 @@ export async function POST(request: Request) {
 
     const message = error instanceof Error ? error.message : "Unexpected error while running virtual try-on.";
     if (activeJob) {
+      try {
+        if (isRetryableReplicateError(error)) {
+          const cachedGarmentUrl = activeJob.garmentHash ? await getCachedGarmentResult(redis, activeJob.garmentHash) : null;
+          if (cachedGarmentUrl) {
+            const cachedJob: TryOnJob = { ...activeJob, status: "succeeded", resultUrl: cachedGarmentUrl, cached: true };
+            await saveTryOnJob(redis, cachedJob);
+            await releaseActiveTryOn(redis, activeJob.inputHash, activeJob.jobId);
+            return NextResponse.json({ jobId: activeJob.jobId, status: "succeeded", resultUrl: cachedGarmentUrl, cached: true });
+          }
+        }
+      } catch { /* Keep the generic failure response if the cached fallback store is also unavailable. */ }
       const failureJob: TryOnJob = {
         ...activeJob,
         status: "failed",
@@ -333,6 +367,8 @@ export async function POST(request: Request) {
       await saveTryOnJob(redis, failureJob).catch(() => undefined);
       await releaseActiveTryOn(redis, activeJob.inputHash, activeJob.jobId).catch(() => undefined);
     }
+
+    console.error(JSON.stringify({ event: "tryon_prediction_start_failed", retryable: isRetryableReplicateError(error) }));
 
     if (/unauthor|invalid token|401/i.test(message)) {
       return errorResponse("Replicate could not authenticate the request. Check REPLICATE_API_TOKEN on the server.", 401);
